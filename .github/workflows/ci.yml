@@ -11,7 +11,8 @@ env:
 jobs:
   windows:
     name: check / clippy / build (windows)
-    runs-on: windows-latest
+    # Pinned (not windows-latest) for a stable image and to avoid the latest->2025 redirect notice.
+    runs-on: windows-2025
     steps:
       - name: Checkout
         uses: actions/checkout@v5
