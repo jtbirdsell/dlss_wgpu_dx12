@@ -27,6 +27,8 @@ mod nvsdk_ngx;
 mod ray_reconstruction;
 mod render_parameters;
 mod sdk;
+#[cfg(feature = "frame-generation")]
+mod streamline;
 
 pub use context::DlssContext;
 pub use instance::{DEFAULT_DXC_PATH, dxc_instance_descriptor, dxc_instance_descriptor_at};
@@ -37,3 +39,9 @@ pub use ray_reconstruction::{
 };
 pub use render_parameters::{DlssExposure, DlssRenderParameters, DlssTexture};
 pub use sdk::DlssSdk;
+#[cfg(feature = "frame-generation")]
+pub use streamline::{
+    DEFAULT_ENGINE_VERSION, DEFAULT_PROJECT_ID, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+    FgConstants, FgResource, FgResources, FgUi, Frame, FrameGenerationContext, FrameGenerationMode,
+    FrameGenerationOptions, FrameGenerationState, Streamline, StreamlineError,
+};

@@ -39,6 +39,53 @@ pub(crate) unsafe fn raw_resource(texture: &wgpu::Texture) -> Option<*mut ID3D12
     Some(raw.as_raw().cast())
 }
 
+/// Returns the DXGI adapter LUID (8 raw bytes, native endianness) of `adapter`'s Dx12 backend, or
+/// `None` if it is not a Dx12 adapter.
+///
+/// `sl::AdapterInfo` wants the adapter's LUID as a raw byte blob; passing a real LUID is what lets
+/// `slIsFeatureSupported` do the adapter-specific check (a null `AdapterInfo` is a C++ reference the
+/// interposer dereferences, which crashes). We read it from the wgpu-hal dx12 `Adapter` via its
+/// `raw_adapter()` accessor (`IDXGIAdapter3`) and `GetDesc().AdapterLuid` (a Win32 `LUID =
+/// {u32, i32}`, 8 bytes).
+///
+/// Only compiled with the `frame-generation` feature (the FG context is the sole caller).
+#[cfg(feature = "frame-generation")]
+pub(crate) fn adapter_luid(adapter: &wgpu::Adapter) -> Option<[u8; 8]> {
+    // SAFETY: `as_hal::<Dx12>` yields a guard borrowing the adapter's HAL state; we only read
+    // through it in this scope. `GetDesc` is a const COM method.
+    let hal_adapter = unsafe { adapter.as_hal::<Dx12>() }?;
+    let dxgi_adapter = hal_adapter.raw_adapter();
+    let desc = unsafe { dxgi_adapter.GetDesc() }.ok()?;
+    let luid = desc.AdapterLuid;
+    let mut bytes = [0u8; 8];
+    bytes[0..4].copy_from_slice(&luid.LowPart.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&luid.HighPart.to_ne_bytes());
+    Some(bytes)
+}
+
+/// Calls `IDXGISwapChain3::GetCurrentBackBufferIndex()` on `surface`'s (Streamline-proxied) Dx12
+/// swapchain, or returns `None` if `surface` is not a Dx12 surface or has not been configured yet.
+///
+/// This is **required every frame** by DLSS Frame Generation on D3D12. wgpu never calls it (it
+/// tracks the acquired back-buffer index internally and presents a waitable swapchain), so without
+/// this call DLSS-G reports `eFailGetCurrentBackBufferIndexNotCalled` and silently passes the real
+/// frame straight through Present without generating. Because the wgpu fork upgraded its swapchain
+/// to a Streamline proxy in `Instance::init` (rev `d81d755`), this query routes through SL's
+/// `slHookGetCurrentBackBufferIndex` hook and is how SL learns the per-frame back-buffer cadence to
+/// insert the generated frame into the present sequence. It is a read-only query and does not
+/// perturb wgpu's own index tracking.
+///
+/// Only compiled with the `frame-generation` feature (it is the sole caller).
+#[cfg(feature = "frame-generation")]
+pub(crate) fn current_back_buffer_index(surface: &wgpu::Surface) -> Option<u32> {
+    // SAFETY: `as_hal::<Dx12>` hands back a guard borrowing the surface's HAL state; we only read
+    // through it within this scope. `GetCurrentBackBufferIndex` is a const COM method with no
+    // arguments and no side effects on wgpu's tracking.
+    let hal_surface = unsafe { surface.as_hal::<Dx12>() }?;
+    let swap_chain = hal_surface.swap_chain()?;
+    Some(unsafe { swap_chain.GetCurrentBackBufferIndex() })
+}
+
 /// Runs `f` with the raw recording `ID3D12GraphicsCommandList` of `encoder`'s Dx12 backend.
 ///
 /// The list is only open (and the pointer valid) for the duration of `f` — i.e. before the encoder

@@ -1,0 +1,285 @@
+//! Public input types for DLSS Frame Generation: the per-frame resource tags ([`FgResources`] /
+//! [`FgResource`]) and the per-frame common constants ([`FgConstants`]).
+//!
+//! These are the data the host hands to [`super::frame_gen::Frame::tag`] and
+//! [`super::frame_gen::Frame::set_constants`] each frame. They are deliberately plain, owned data
+//! (not raw pointers): the unsafe FFI translation into `sl::Resource` / `sl::ResourceTag` /
+//! `sl::Constants` happens inside the frame-gen module, against the proven spike layout.
+
+use super::types::{
+    Boolean, BufferType, Constants, Float2, K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_HUD_LESS_COLOR,
+    K_BUFFER_TYPE_MOTION_VECTORS, K_BUFFER_TYPE_UI_ALPHA, K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
+};
+use glam::{UVec2, Vec2};
+
+/// `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE` — the proven default state for FG input textures.
+///
+/// This is the state Streamline expects each tagged input to be in when it consumes the tag during
+/// the interposed `Present`. The spike validated `0x80` for textures wgpu created with
+/// `TEXTURE_BINDING`. If the runtime reports `eErrorMissingResourceState` or you see corruption,
+/// override it per-resource with [`FgResource::with_resource_state`] to match the state wgpu has
+/// actually left the resource in.
+pub const D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE: u32 = 0x80;
+
+/// A single texture handed to DLSS Frame Generation, with the D3D12 resource state SL should assume.
+///
+/// Dimensions and native (DXGI) format are derived from the [`wgpu::Texture`] automatically; the
+/// only knob is the D3D12 resource state, which defaults to the proven
+/// [`D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE`].
+#[derive(Clone, Copy)]
+pub struct FgResource<'a> {
+    pub(crate) texture: &'a wgpu::Texture,
+    pub(crate) resource_state: u32,
+}
+
+impl<'a> FgResource<'a> {
+    /// Wraps a texture with the default, proven `PIXEL_SHADER_RESOURCE` (`0x80`) state.
+    pub fn new(texture: &'a wgpu::Texture) -> Self {
+        Self {
+            texture,
+            resource_state: D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        }
+    }
+
+    /// Overrides the assumed D3D12 resource state (a `D3D12_RESOURCE_STATES` bitmask).
+    ///
+    /// Use this only if SL reports `eErrorMissingResourceState` or you observe corruption with the
+    /// default `0x80` — the value must match the state wgpu has left the texture in at present time.
+    pub fn with_resource_state(mut self, state: u32) -> Self {
+        self.resource_state = state;
+        self
+    }
+
+    /// Render-resolution dimensions, read from the texture.
+    pub(crate) fn dimensions(&self) -> UVec2 {
+        let size = self.texture.size();
+        UVec2::new(size.width, size.height)
+    }
+
+    /// Native DXGI format, derived from the texture's wgpu format.
+    pub(crate) fn native_format(&self) -> u32 {
+        dxgi_format_of(self.texture.format())
+    }
+}
+
+/// How the user interface layer is supplied to DLSS Frame Generation, if at all.
+///
+/// DLSS-G can recomposite a separate UI layer over the generated frame so the UI stays crisp. It
+/// accepts either a combined color+alpha texture (tagged as `kBufferTypeUIColorAndAlpha`) or an
+/// alpha-only mask (tagged as `kBufferTypeUIHintTagForHiResColor` / `UI_ALPHA`).
+pub enum FgUi<'a> {
+    /// A UI texture carrying both color and alpha (e.g. `Rgba8Unorm`).
+    ColorAndAlpha(FgResource<'a>),
+    /// An alpha-only UI hint mask.
+    Alpha(FgResource<'a>),
+}
+
+/// The set of textures tagged for DLSS Frame Generation each frame.
+///
+/// `depth` and `motion_vectors` are required (DLSS-G interpolates from them). `hudless_color` and
+/// `ui` are optional: provide `hudless_color` (the scene color *without* UI, matching the back
+/// buffer's format) plus a [`FgUi`] layer when you want crisp UI recomposition over generated
+/// frames; omit both to let DLSS-G interpolate the back buffer as-is.
+pub struct FgResources<'a> {
+    /// Depth buffer at render resolution.
+    pub depth: FgResource<'a>,
+    /// Screen-space motion vectors at render resolution (see [`FgConstants::with_pixel_motion`]).
+    pub motion_vectors: FgResource<'a>,
+    /// Optional HUD-less scene color (same format as the swapchain back buffer).
+    pub hudless_color: Option<FgResource<'a>>,
+    /// Optional UI layer for recomposition over the generated frame.
+    pub ui: Option<FgUi<'a>>,
+}
+
+impl<'a> FgResources<'a> {
+    /// The `(FgResource, sl::BufferType)` pairs to tag this frame, in the spike's proven order:
+    /// depth, motion vectors, then (if present) HUD-less color and UI.
+    pub(crate) fn tags(&self) -> Vec<(FgResource<'a>, BufferType)> {
+        let mut out = Vec::with_capacity(4);
+        out.push((self.depth, K_BUFFER_TYPE_DEPTH));
+        out.push((self.motion_vectors, K_BUFFER_TYPE_MOTION_VECTORS));
+        if let Some(hudless) = self.hudless_color {
+            out.push((hudless, K_BUFFER_TYPE_HUD_LESS_COLOR));
+        }
+        match &self.ui {
+            Some(FgUi::ColorAndAlpha(r)) => out.push((*r, K_BUFFER_TYPE_UI_COLOR_AND_ALPHA)),
+            Some(FgUi::Alpha(r)) => out.push((*r, K_BUFFER_TYPE_UI_ALPHA)),
+            None => {}
+        }
+        out
+    }
+}
+
+/// Per-frame common constants handed to DLSS Frame Generation via `slSetConstants`.
+///
+/// Camera matrices default to identity, which is correct for the common case where *all* motion
+/// (object and camera) is baked into the motion-vector buffer. The fields most likely to need
+/// tuning are [`Self::jitter_offset`], [`Self::mvec_scale`], [`Self::reset`],
+/// [`Self::depth_inverted`], and [`Self::camera_motion_included`].
+///
+/// # Motion-vector scaling (a proven requirement)
+/// Motion vectors must be normalized to the `[-1, 1]` range. If your motion-vector buffer stores
+/// per-pixel displacement in **render-resolution pixels** (the usual case), set
+/// `mvec_scale = (1/width, 1/height)` — use the [`Self::with_pixel_motion`] helper. The spike
+/// proved that leaving this at `(1, 1)` (so DLSS-G reads an 8-pixel mvec as "8 screens/frame") is
+/// what kept `numFramesActuallyPresented` stuck at 1; the correct scale flipped it to 2.
+#[derive(Clone, Copy, Debug)]
+pub struct FgConstants {
+    /// Camera view-to-clip (projection) matrix, row-major. Identity by default.
+    pub camera_view_to_clip: [[f32; 4]; 4],
+    /// Inverse of [`Self::camera_view_to_clip`]. Identity by default.
+    pub clip_to_camera_view: [[f32; 4]; 4],
+    /// Reprojection: current clip space to previous-frame clip space. Identity by default.
+    pub clip_to_prev_clip: [[f32; 4]; 4],
+    /// Reprojection: previous-frame clip space to current clip space. Identity by default.
+    pub prev_clip_to_clip: [[f32; 4]; 4],
+    /// Subpixel jitter applied to the camera this frame. `(0, 0)` if not jittering.
+    pub jitter_offset: Vec2,
+    /// Scale that normalizes motion-vector values to `[-1, 1]`. See [`Self::with_pixel_motion`].
+    pub mvec_scale: Vec2,
+    /// Reset temporal history (set `true` on the first frame and on camera cuts / discontinuities).
+    pub reset: bool,
+    /// Whether the depth buffer is reversed (near = 1.0). `false` for standard `[0,1]` depth.
+    pub depth_inverted: bool,
+    /// Whether the motion-vector buffer already encodes full (object + camera) motion. When `true`,
+    /// DLSS-G uses the mvecs verbatim and does not synthesize camera motion from the matrices —
+    /// this is the proven setting when your mvec buffer carries complete motion.
+    pub camera_motion_included: bool,
+    /// Near plane distance (a sane, non-degenerate frustum value is required even with identity
+    /// matrices).
+    pub camera_near: f32,
+    /// Far plane distance.
+    pub camera_far: f32,
+    /// Vertical field of view, in radians.
+    pub camera_fov: f32,
+    /// Aspect ratio (width / height).
+    pub camera_aspect_ratio: f32,
+}
+
+impl FgConstants {
+    /// Identity-camera defaults: identity matrices, no jitter, `mvec_scale = (1, 1)`, history reset
+    /// off, standard depth, full motion in the mvec buffer.
+    ///
+    /// Remember to call [`Self::with_pixel_motion`] if your motion vectors are in pixels, and to set
+    /// [`Self::reset`] `true` on the first frame.
+    pub fn new() -> Self {
+        Self {
+            camera_view_to_clip: IDENTITY4,
+            clip_to_camera_view: IDENTITY4,
+            clip_to_prev_clip: IDENTITY4,
+            prev_clip_to_clip: IDENTITY4,
+            jitter_offset: Vec2::ZERO,
+            mvec_scale: Vec2::ONE,
+            reset: false,
+            depth_inverted: false,
+            camera_motion_included: true,
+            camera_near: 0.1,
+            camera_far: 1000.0,
+            camera_fov: 1.0,
+            camera_aspect_ratio: 16.0 / 9.0,
+        }
+    }
+
+    /// Sets [`Self::mvec_scale`] to `(1/width, 1/height)` — the proven normalization for a
+    /// motion-vector buffer that stores per-pixel displacement in render-resolution pixels.
+    ///
+    /// This is requirement (3) of DLSS-G: pixel-space mvecs must be normalized to `[-1, 1]`.
+    pub fn with_pixel_motion(mut self, render_resolution: UVec2) -> Self {
+        self.mvec_scale = Vec2::new(
+            1.0 / render_resolution.x.max(1) as f32,
+            1.0 / render_resolution.y.max(1) as f32,
+        );
+        self
+    }
+
+    /// Builds the `#[repr(C)]` [`Constants`] handed to `slSetConstants`, copying every field into
+    /// the spike-proven layout. Camera basis vectors and the remaining `sl::Constants` fields keep
+    /// the validated defaults from [`Constants::new`].
+    pub(crate) fn to_sl(self) -> Constants {
+        let mut c = Constants::new();
+        c.camera_view_to_clip = to_float4x4(self.camera_view_to_clip);
+        c.clip_to_camera_view = to_float4x4(self.clip_to_camera_view);
+        c.clip_to_prev_clip = to_float4x4(self.clip_to_prev_clip);
+        c.prev_clip_to_clip = to_float4x4(self.prev_clip_to_clip);
+        c.jitter_offset = Float2 {
+            x: self.jitter_offset.x,
+            y: self.jitter_offset.y,
+        };
+        c.mvec_scale = Float2 {
+            x: self.mvec_scale.x,
+            y: self.mvec_scale.y,
+        };
+        c.depth_inverted = bool_to_sl(self.depth_inverted);
+        c.camera_motion_included = bool_to_sl(self.camera_motion_included);
+        c.reset = bool_to_sl(self.reset);
+        c.camera_near = self.camera_near;
+        c.camera_far = self.camera_far;
+        c.camera_fov = self.camera_fov;
+        c.camera_aspect_ratio = self.camera_aspect_ratio;
+        c
+    }
+}
+
+impl Default for FgConstants {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const IDENTITY4: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
+fn bool_to_sl(b: bool) -> Boolean {
+    if b { Boolean::True } else { Boolean::False }
+}
+
+fn to_float4x4(m: [[f32; 4]; 4]) -> super::types::Float4x4 {
+    use super::types::Float4;
+    super::types::Float4x4 {
+        row: [
+            Float4 { x: m[0][0], y: m[0][1], z: m[0][2], w: m[0][3] },
+            Float4 { x: m[1][0], y: m[1][1], z: m[1][2], w: m[1][3] },
+            Float4 { x: m[2][0], y: m[2][1], z: m[2][2], w: m[2][3] },
+            Float4 { x: m[3][0], y: m[3][1], z: m[3][2], w: m[3][3] },
+        ],
+    }
+}
+
+/// Maps a [`wgpu::TextureFormat`] to its numeric `DXGI_FORMAT` value (dxgiformat.h), for SL's
+/// `sl::Resource::nativeFormat` and the `DLSSGOptions::*BufferFormat` fields.
+///
+/// Covers the formats an FG integration realistically uses for its tagged inputs (depth, motion
+/// vectors, HUD-less color, UI) and common swapchain formats; anything unmapped falls back to
+/// `DXGI_FORMAT_UNKNOWN` (0) with a warning, which SL tolerates (it then infers the format).
+pub(crate) fn dxgi_format_of(format: wgpu::TextureFormat) -> u32 {
+    use wgpu::TextureFormat as F;
+    match format {
+        // Color / swapchain
+        F::Bgra8Unorm => 87,       // DXGI_FORMAT_B8G8R8A8_UNORM
+        F::Bgra8UnormSrgb => 91,   // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+        F::Rgba8Unorm => 28,       // DXGI_FORMAT_R8G8B8A8_UNORM
+        F::Rgba8UnormSrgb => 29,   // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+        F::Rgba16Float => 10,      // DXGI_FORMAT_R16G16B16A16_FLOAT
+        F::Rgb10a2Unorm => 24,     // DXGI_FORMAT_R10G10B10A2_UNORM
+        // Depth
+        F::R32Float => 41,         // DXGI_FORMAT_R32_FLOAT
+        F::Depth32Float => 40,     // DXGI_FORMAT_D32_FLOAT
+        F::Depth24Plus | F::Depth24PlusStencil8 => 45, // DXGI_FORMAT_D24_UNORM_S8_UINT
+        // Motion vectors
+        F::Rg16Float => 34,        // DXGI_FORMAT_R16G16_FLOAT
+        F::Rg32Float => 16,        // DXGI_FORMAT_R32G32_FLOAT
+        // UI alpha-only mask
+        F::R8Unorm => 61,          // DXGI_FORMAT_R8_UNORM
+        F::R16Float => 54,         // DXGI_FORMAT_R16_FLOAT
+        other => {
+            log::warn!(
+                "dxgi_format_of: unmapped wgpu format {other:?}; using DXGI_FORMAT_UNKNOWN(0)"
+            );
+            0
+        }
+    }
+}

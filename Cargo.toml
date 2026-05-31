@@ -10,21 +10,36 @@ categories = ["rendering", "graphics"]
 
 # Windows-only crate (wgpu Dx12 backend + NVIDIA NGX).
 [dependencies]
-# Local patched wgpu (adds dx12 raw_command_list/raw_device/raw_queue accessors; gfx-rs/wgpu#8888).
-# Consumers must apply the same patch (or wait for it to land upstream) in their workspace.
-wgpu = { path = "../wgpu/wgpu", default-features = false, features = ["dx12"] }
+# Patched wgpu (stock v29.0.3 + two additive dx12 patches):
+#   1. raw_command_list()/raw_device/raw_queue accessors (gfx-rs/wgpu#8888) — needed by SR/RR/FG.
+#   2. Streamline factory-upgrade in Instance::init (rev d81d755) — runtime-guarded no-op unless
+#      sl.interposer.dll is loaded; required for DLSS Frame Generation over wgpu's swapchain.
+# Pinned to the pushed jtbirdsell/wgpu fork so this crate resolves to the SAME wgpu a consumer pins
+# via [patch.crates-io]. (Was ../wgpu/wgpu local path.)
+wgpu = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38", default-features = false, features = ["dx12"] }
 # Only for the `windows_core::Interface::as_raw` trait + (later) FG swapchain types. Must unify
 # with the windows version wgpu-hal uses (0.62) so COM interface newtypes are ABI/type compatible.
 windows = { version = "0.62", default-features = false, features = [
     "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # Frame Generation (Streamline): detect a loaded sl.interposer.dll + verify its signature.
+    "Win32_System_LibraryLoader",
+    "Win32_Security_WinTrust",
+    # WINTRUST_DATA / WINTRUST_DATA_0 (and their Default impls) are gated behind the Cryptography
+    # feature; it also provides CryptQueryObject / CryptMsgGetParam / CertGetNameStringW used to
+    # pin the interposer's signer subject to "NVIDIA" in src/streamline/security.rs.
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
 ] }
 glam = "0.29"
 uuid = "1"
 bitflags = "2"
 thiserror = "2"
 log = "0.4"
+# Frame Generation only: load sl.interposer.dll and resolve its exported sl* entry points at
+# runtime (the SL headers are C++ so we cannot #[link] them). Off unless `frame-generation`.
+libloading = { version = "0.8", optional = true }
 
 [build-dependencies]
 bindgen = "0.72"
@@ -35,6 +50,15 @@ cc = "1"
 pollster = "0.4"
 # v4 GUID generation for the project id in the headless test (merges with the crate's uuid dep).
 uuid = { version = "1", features = ["v4"] }
+# The frame_generation example needs a real, composited window (DLSS-G declines to present
+# generated frames to a non-composited window). The SR example is headless and does not use this.
+winit = "0.30"
+# Route the crate's `log` output (Streamline init/per-frame logging) to stderr in the examples.
+env_logger = "0.11"
+# Pin the SAME patched wgpu the crate uses, additionally enabling `wgsl` so the frame_generation
+# example can author its inline moving-bar WGSL shader. Cargo unifies this with the crate's own
+# wgpu dependency (same git rev), so it only adds the `wgsl` feature for example/test builds.
+wgpu = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38", default-features = false, features = ["dx12", "wgsl"] }
 
 [features]
 default = ["super-resolution"]
@@ -42,9 +66,10 @@ default = ["super-resolution"]
 super-resolution = []
 # DLSS Ray Reconstruction / DLSS-D (raw NGX). Mutually exclusive with SR at runtime.
 ray-reconstruction = []
-# DLSS Frame Generation / DLSS-G via NVIDIA Streamline. EXPERIMENTAL, off by default;
-# requires owning the swapchain (see plan "Path C") and a runtime capability gate.
-frame-generation = []
+# DLSS Frame Generation / DLSS-G via NVIDIA Streamline. EXPERIMENTAL, off by default.
+# Loads sl.interposer.dll at runtime; relies on the wgpu fork's Instance::init factory-upgrade
+# (rev d81d755) to make wgpu's swapchain a Streamline proxy. See src/streamline/.
+frame-generation = ["dep:libloading"]
 # Link the NGX dev/debug feature library + dev DLL search path (debug overlay). Never ship.
 debug_overlay = []
 
@@ -52,3 +77,9 @@ debug_overlay = []
 [[example]]
 name = "ray_reconstruction"
 required-features = ["ray-reconstruction"]
+
+# The Frame Generation example only builds when its feature is enabled (it uses the Streamline FG
+# API, which is gated behind `frame-generation`).
+[[example]]
+name = "frame_generation"
+required-features = ["frame-generation"]
