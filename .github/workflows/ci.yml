@@ -53,6 +53,24 @@ jobs:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: cargo clippy --all-targets --features ray-reconstruction -- -D warnings
 
+      # Frame Generation goes through NVIDIA Streamline, which is loaded at RUNTIME via the
+      # interposer (sl.interposer.dll) — nothing from the Streamline SDK is linked at build time.
+      # So this only needs the same DLSS_SDK (NGX headers/import libs) + LIBCLANG_PATH as the SR/RR
+      # checks above; no STREAMLINE_SDK is required to compile.
+      - name: cargo check (frame-generation)
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: cargo check --features frame-generation
+
+      - name: clippy (frame-generation)
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: cargo clippy --all-targets --features frame-generation -- -D warnings
+
       # GitHub runners have no NVIDIA GPU, so DLSS cannot be executed here — only build/link the
       # tests and examples (which links the NGX lib + system libs and validates bindgen output).
       - name: Build tests + examples (do not run; no NVIDIA GPU on CI)

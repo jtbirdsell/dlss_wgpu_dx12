@@ -147,7 +147,12 @@ impl SlApi {
     /// Locate, verify, load `sl.interposer.dll`, and resolve the exported core functions.
     ///
     /// The interposer is found via `$STREAMLINE_SDK/bin/x64/sl.interposer.dll`; its Authenticode
-    /// signature is verified before the DLL is loaded. Feature functions are left `None` until
+    /// signature is verified (trusted chain + NVIDIA signer pin, see [`super::security`]) before the
+    /// DLL is loaded. It is then loaded with the **default** Windows search order: NVIDIA's
+    /// interposer locates its sibling plugins (`sl.common`, `sl.dlss_g`, ...) relative to the loading
+    /// context, and constraining the search (e.g. `LOAD_LIBRARY_SEARCH_*`) or passing a verbatim
+    /// `\\?\` path makes `slInit` fail with `eErrorNoPlugins`, so we deliberately keep the plain
+    /// load that the hardware-validated path uses. Feature functions are left `None` until
     /// [`SlApi::resolve_feature_functions`] runs (after `slSetD3DDevice`).
     ///
     /// # Safety
@@ -161,12 +166,16 @@ impl SlApi {
             return Err(StreamlineError::InterposerNotFound(path));
         }
 
-        // Hard gate: refuse to load an interposer that is not a trusted, NVIDIA-signed binary.
+        // Hard gate: refuse to load an interposer that is not a trusted, NVIDIA-signed binary. We
+        // verify and load the SAME `path` value (no canonicalization: a `\\?\` verbatim path breaks
+        // the interposer's relative plugin discovery -> slInit eErrorNoPlugins).
         verify_interposer_signature(&path)?;
         log::info!("loading verified sl.interposer.dll from {}", path.display());
 
         // SAFETY: `path` was just signature-verified and confirmed to exist. Loading a DLL runs its
-        // entry point; we accept that for the (now trusted) NVIDIA interposer.
+        // entry point; we accept that for the (now trusted) NVIDIA interposer. We use the default
+        // search order (`Library::new`) because the interposer must find its sibling SL plugins via
+        // the standard search; restricting it makes slInit report eErrorNoPlugins.
         let lib = unsafe { ll::Library::new(&path) }.map_err(|source| {
             StreamlineError::LibraryLoadFailed {
                 path: path.clone(),

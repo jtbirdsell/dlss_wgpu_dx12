@@ -9,7 +9,14 @@
 //!      embedded Authenticode signature and confirms its certificate chain terminates at a trusted
 //!      root in the machine/user trust stores (this is the same check Windows applies when you
 //!      double-click a signed binary). Unsigned, tampered, expired-chain, or untrusted binaries
-//!      return a failure HRESULT and we refuse to load.
+//!      return a failure HRESULT and we refuse to load. We additionally request **revocation
+//!      checking of the whole chain** (`WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN`) so a
+//!      *revoked* signing certificate is rejected, not merely an untrusted one. Because revocation
+//!      requires reaching a CRL/OCSP responder, an *offline* host would otherwise hard-fail a
+//!      legitimately-signed binary; we therefore degrade gracefully: if (and only if) the revocation
+//!      server is unreachable we retry once with revocation disabled and emit a loud
+//!      `REVOCATION-CHECK-SKIPPED` warning for SIEM. A genuinely revoked certificate stays a hard
+//!      failure.
 //!
 //!   2. **Signer identity (best-effort)** — we then crack the embedded PKCS#7 with
 //!      [`CryptQueryObject`], pull the signer's leaf certificate, and require its subject common
@@ -35,9 +42,10 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Security::WinTrust::{
-    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
-    WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
-    WinVerifyTrust,
+    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+    WINTRUST_DATA_REVOCATION_CHECKS, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
+    WTD_REVOCATION_CHECK_CHAIN, WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE,
+    WTD_STATEACTION_VERIFY, WTD_UI_NONE, WinVerifyTrust,
 };
 use windows::core::PCWSTR;
 
@@ -45,8 +53,25 @@ use windows::core::PCWSTR;
 /// HRESULT (e.g. `TRUST_E_NOSIGNATURE`, `TRUST_E_SUBJECT_NOT_TRUSTED`, `CERT_E_UNTRUSTEDROOT`).
 const WIN_VERIFY_TRUST_S_OK: i32 = 0;
 
+/// HRESULTs that indicate revocation could **not be performed** because the revocation server was
+/// offline/unreachable (as opposed to the certificate actually being revoked). These are the only
+/// failures for which we degrade to a no-revocation retry; every other `TRUST_E_*`/`CERT_E_*` —
+/// including an actually-revoked cert (`CERT_E_REVOKED`) — remains a hard failure.
+///
+/// Stored as `u32` so they compare cleanly against the `WinVerifyTrust` `i32` HRESULT reinterpreted
+/// as `u32` (these codes have the high bit set and are negative as `i32`).
+///   * `CERT_E_REVOCATION_FAILURE`  (`0x800B010E`) — the revocation function could not check.
+///   * `CRYPT_E_REVOCATION_OFFLINE` (`0x80092013`) — the revocation server was offline.
+///   * `CRYPT_E_NO_REVOCATION_CHECK`(`0x80092012`) — no revocation check could be performed.
+const REVOCATION_OFFLINE_HRESULTS: [u32; 3] = [0x800B_010E, 0x8009_2013, 0x8009_2012];
+
 /// The signer-name substring we pin the interposer to (case-insensitive compare).
 const REQUIRED_SIGNER_SUBSTR: &str = "NVIDIA";
+
+/// Environment variable that, when set to `"1"`, promotes the NVIDIA signer pin from best-effort to
+/// a hard gate: a parse failure (soft-pass) or a non-NVIDIA subject becomes an `Err` instead of a
+/// warning. For high-assurance deployments that refuse to run an unverifiable signer.
+const REQUIRE_NVIDIA_SIGNER_ENV: &str = "STREAMLINE_REQUIRE_NVIDIA_SIGNER";
 
 /// Verify that `path` is an Authenticode-signed binary whose certificate chain terminates at a
 /// trusted root, and (best-effort) that the signer subject contains "NVIDIA".
@@ -70,8 +95,76 @@ pub(crate) fn verify_interposer_signature(path: &Path) -> Result<(), StreamlineE
 // `OsStr::encode_wide` lives in the Windows-only extension trait.
 use std::os::windows::ffi::OsStrExt;
 
-/// Step 1 (hard gate): `WinVerifyTrust` chain-to-trusted-root validation.
+/// Step 1 (hard gate): `WinVerifyTrust` chain-to-trusted-root validation **with revocation
+/// checking of the whole chain**.
+///
+/// We first verify with `WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN`. If that fails
+/// *specifically* because the revocation server was unreachable (see [`REVOCATION_OFFLINE_HRESULTS`])
+/// — e.g. an air-gapped or offline host — we retry **once** with revocation disabled and emit a loud
+/// `REVOCATION-CHECK-SKIPPED` warning for SIEM. Any other failure (untrusted root, no signature,
+/// tampered, or an *actually revoked* certificate) stays a hard `Err`.
 fn verify_trust(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
+    // Attempt 1: full-chain revocation checking.
+    match verify_trust_once(wide_path, WTD_REVOKE_WHOLECHAIN, true) {
+        WIN_VERIFY_TRUST_S_OK => {
+            log::debug!(
+                "WinVerifyTrust: '{}' is Authenticode-signed, chains to a trusted root, and passed \
+                 whole-chain revocation checking",
+                path.display()
+            );
+            Ok(())
+        }
+        status if is_revocation_offline(status) => {
+            // The cert is NOT revoked — we simply could not reach a CRL/OCSP responder. Degrade to
+            // a no-revocation verify so an offline host can still load a legitimately-signed binary,
+            // but make the downgrade conspicuous and machine-greppable for SIEM.
+            log::warn!(
+                "REVOCATION-CHECK-SKIPPED: WinVerifyTrust whole-chain revocation check for '{}' \
+                 could not reach a revocation server (HRESULT {status:#010x}); retrying once WITHOUT \
+                 revocation checking. The signature/chain is still validated; only freshness against \
+                 revocation lists is skipped.",
+                path.display()
+            );
+            match verify_trust_once(wide_path, WTD_REVOKE_NONE, false) {
+                WIN_VERIFY_TRUST_S_OK => {
+                    log::warn!(
+                        "REVOCATION-CHECK-SKIPPED: '{}' passed WinVerifyTrust with revocation \
+                         checking DISABLED (offline fallback). Chain-to-trusted-root is verified; \
+                         revocation status is UNKNOWN.",
+                        path.display()
+                    );
+                    Ok(())
+                }
+                status => Err(StreamlineError::SignatureVerificationFailed(format!(
+                    "WinVerifyTrust (offline no-revocation retry) returned HRESULT {status:#010x} for '{}'",
+                    path.display()
+                ))),
+            }
+        }
+        status => Err(StreamlineError::SignatureVerificationFailed(format!(
+            "WinVerifyTrust returned HRESULT {status:#010x} for '{}'",
+            path.display()
+        ))),
+    }
+}
+
+/// Returns `true` if `status` is one of the "revocation server unreachable" HRESULTs (as opposed to
+/// the certificate actually being revoked). Compares the `i32` HRESULT reinterpreted as `u32`.
+fn is_revocation_offline(status: i32) -> bool {
+    REVOCATION_OFFLINE_HRESULTS.contains(&(status as u32))
+}
+
+/// Perform a single `WinVerifyTrust` VERIFY pass (always paired with the matching `_CLOSE` cleanup)
+/// using the given revocation policy, and return the raw HRESULT.
+///
+/// `revocation_checks` selects `fdwRevocationChecks`; when `check_chain` is `true` the
+/// `WTD_REVOCATION_CHECK_CHAIN` provider flag is OR'd into `dwProvFlags` to actually exercise the
+/// chain revocation logic.
+fn verify_trust_once(
+    wide_path: &[u16],
+    revocation_checks: WINTRUST_DATA_REVOCATION_CHECKS,
+    check_chain: bool,
+) -> i32 {
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
 
     let mut file_info = WINTRUST_FILE_INFO {
@@ -83,7 +176,7 @@ fn verify_trust(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
     let mut trust_data = WINTRUST_DATA {
         cbStruct: size_of::<WINTRUST_DATA>() as u32,
         dwUIChoice: WTD_UI_NONE,
-        fdwRevocationChecks: WTD_REVOKE_NONE,
+        fdwRevocationChecks: revocation_checks,
         dwUnionChoice: WTD_CHOICE_FILE,
         dwStateAction: WTD_STATEACTION_VERIFY,
         Anonymous: WINTRUST_DATA_0 {
@@ -91,6 +184,10 @@ fn verify_trust(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
         },
         ..Default::default()
     };
+    if check_chain {
+        // Exercise revocation across the whole chain rather than just the leaf.
+        trust_data.dwProvFlags |= WTD_REVOCATION_CHECK_CHAIN;
+    }
 
     // SAFETY: `action` and `trust_data` are valid, properly sized, locally-owned Win32 structs;
     // `trust_data.Anonymous.pFile` points at `file_info`, which outlives this call. We pass a null
@@ -118,27 +215,22 @@ fn verify_trust(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
         );
     }
 
-    if status == WIN_VERIFY_TRUST_S_OK {
-        log::debug!(
-            "WinVerifyTrust: '{}' is Authenticode-signed and chains to a trusted root",
-            path.display()
-        );
-        Ok(())
-    } else {
-        Err(StreamlineError::SignatureVerificationFailed(format!(
-            "WinVerifyTrust returned HRESULT {status:#010x} for '{}'",
-            path.display()
-        )))
-    }
+    status
 }
 
 /// Step 2 (best-effort hard gate): crack the embedded PKCS#7, pull the signer leaf certificate, and
 /// require its subject to contain "NVIDIA".
 ///
-/// A failure to *parse* the signature after the trust gate already passed is logged and treated as
-/// a soft pass (trust is the load-bearing gate). A successfully parsed non-NVIDIA subject is a hard
-/// [`StreamlineError::UntrustedSigner`].
+/// A failure to *parse* the signature after the trust gate already passed is logged loudly (with a
+/// `SIGNER-PIN-SKIPPED` SIEM token) and treated as a soft pass — trust is the load-bearing gate. A
+/// successfully parsed non-NVIDIA subject is always a hard [`StreamlineError::UntrustedSigner`].
+///
+/// When the `STREAMLINE_REQUIRE_NVIDIA_SIGNER` environment variable is set to `"1"`, the soft pass
+/// is **promoted to a hard failure** ([`StreamlineError::SignatureVerificationFailed`]): a
+/// high-assurance deployment refuses to load an interposer whose signer it cannot positively
+/// confirm to be NVIDIA.
 fn verify_signer_is_nvidia(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
+    let require_nvidia = signer_pin_is_required();
     match extract_signer_subject(wide_path) {
         Ok(subject) => {
             if subject
@@ -150,19 +242,42 @@ fn verify_signer_is_nvidia(path: &Path, wide_path: &[u16]) -> Result<(), Streaml
                 );
                 Ok(())
             } else {
+                // A parseable, non-NVIDIA subject is always a hard failure (independent of the env
+                // var) — see the function doc.
                 Err(StreamlineError::UntrustedSigner(subject))
             }
         }
         Err(detail) => {
-            // Trust already passed; we just could not parse the subject. Do not hard-fail.
-            log::warn!(
-                "sl.interposer.dll passed WinVerifyTrust but its signer subject could not be \
-                 extracted for NVIDIA pinning ('{}'): {detail}. Proceeding on the trust gate only.",
-                path.display()
-            );
-            Ok(())
+            // Trust already passed; we just could not parse the subject.
+            if require_nvidia {
+                log::error!(
+                    "SIGNER-PIN-SKIPPED: sl.interposer.dll passed WinVerifyTrust but its signer \
+                     subject could not be extracted for NVIDIA pinning ('{}'): {detail}. \
+                     {REQUIRE_NVIDIA_SIGNER_ENV}=1 — refusing to load.",
+                    path.display()
+                );
+                Err(StreamlineError::SignatureVerificationFailed(format!(
+                    "could not confirm the signer is NVIDIA ({REQUIRE_NVIDIA_SIGNER_ENV}=1 requires \
+                     a positively-parsed NVIDIA signer): {detail}"
+                )))
+            } else {
+                log::warn!(
+                    "SIGNER-PIN-SKIPPED: sl.interposer.dll passed WinVerifyTrust but its signer \
+                     subject could not be extracted for NVIDIA pinning ('{}'): {detail}. \
+                     Proceeding on the trust gate only (set {REQUIRE_NVIDIA_SIGNER_ENV}=1 to make \
+                     this a hard failure).",
+                    path.display()
+                );
+                Ok(())
+            }
         }
     }
+}
+
+/// Whether the NVIDIA signer pin is configured as a hard requirement via
+/// `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1`.
+fn signer_pin_is_required() -> bool {
+    std::env::var_os(REQUIRE_NVIDIA_SIGNER_ENV).is_some_and(|v| v == "1")
 }
 
 /// Crack the embedded PKCS#7 signature on `wide_path` and return the signer leaf certificate's

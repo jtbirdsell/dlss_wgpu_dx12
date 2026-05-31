@@ -427,7 +427,7 @@ impl GpuState {
         let (surface_tex, _bbi) = match frame.acquire(&self.surface) {
             Ok(v) => v,
             Err(StreamlineError::SurfaceUnavailable { status }) => {
-                if idx % STATE_POLL_INTERVAL == 0 {
+                if idx.is_multiple_of(STATE_POLL_INTERVAL) {
                     println!("frame {idx}: surface unavailable ({status}); reconfiguring");
                 }
                 // The `Frame` is dropped here (logged as aborted) — acceptable for a transient
@@ -554,7 +554,7 @@ impl GpuState {
         drop(frame);
 
         // --- (9) Periodically query + report DLSS-G state. ---
-        if idx % STATE_POLL_INTERVAL == 0 {
+        if idx.is_multiple_of(STATE_POLL_INTERVAL) {
             match self.fg.query_state() {
                 Ok(state) => self.report_state(idx, &state),
                 Err(e) => println!("frame {idx}: query_state failed: {e}"),

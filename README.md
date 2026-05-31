@@ -13,7 +13,9 @@ It currently provides:
 - **DLSS Ray Reconstruction (RR / DLSS-D)** — combined denoising + upscaling for path-traced
   input, behind the `ray-reconstruction` feature.
 - **DLSS Frame Generation (FG / DLSS-G)** — *experimental*, behind the `frame-generation`
-  feature. Not yet complete; requires owning the swapchain and is gated at runtime.
+  feature. Generates interpolated frames inside wgpu's own swapchain `Present` via NVIDIA
+  Streamline. Hardware-validated on an RTX 4090; has strict ordering and runtime requirements.
+  See the [Frame Generation (experimental)](#frame-generation-experimental) section below.
 
 > **Windows only.** This crate targets the wgpu Dx12 backend and the NVIDIA NGX SDK, both of
 > which are Windows-only. Building on any other platform fails with a `compile_error!`. Use
@@ -104,6 +106,116 @@ For Ray Reconstruction, enable the `ray-reconstruction` feature and use
 `DlssRayReconstructionContext` / `DlssRayReconstructionParameters` instead. RR is mutually
 exclusive with SR for a given upscale pass — create *either* a `DlssContext` *or* a
 `DlssRayReconstructionContext`, never both.
+
+## Frame Generation (experimental)
+
+> **Experimental, behind the `frame-generation` cargo feature** (`--features frame-generation`,
+> off by default). DLSS Frame Generation (DLSS-G) interpolates frames *inside* the swapchain
+> `Present` call. Unlike SR/RR — which call NGX directly on a command list — FG is driven by
+> NVIDIA **Streamline**: the patched wgpu fork upgrades its DXGI factory to a Streamline proxy in
+> `Instance::init` (only when `sl.interposer.dll` is already loaded), so wgpu's own swapchain
+> becomes the SL proxy that drives DLSS-G. This feature has strict ordering and runtime
+> requirements; read all of them before integrating. Validated on an RTX 4090
+> (`numFramesActuallyPresented == 2`).
+
+### API flow
+
+The public surface is `Streamline`, `FrameGenerationContext`, `Frame` (plus the per-frame input
+types `FgConstants`, `FgResources`, `FgResource`, `FgUi`, and `FrameGenerationOptions` /
+`FrameGenerationState`).
+
+- **`Streamline::init()` — before your `wgpu::Instance`.** This loads (after signature
+  verification) and initializes `sl.interposer.dll` for DLSS-G + Reflex + PCL. It must run *before*
+  `wgpu::Instance::new`, because the fork upgrades its DXGI factory to a Streamline proxy only if
+  the interposer is already loaded. Create the instance first and DLSS-G can never bind to wgpu's
+  swapchain. This is the single most important rule.
+- **`FrameGenerationContext::new(&mut streamline, &device, &adapter, &options)` — after the device
+  but *before* `surface.configure()`.** It runs `slSetD3DDevice` (which must precede swapchain
+  creation), checks feature support against the adapter's real LUID, enables Reflex, and applies
+  `slDLSSGSetOptions`. On success it *moves* the Streamline core API into the context (the
+  `Streamline` handle then becomes inert); on failure the handle stays intact and reusable.
+- **Per frame**, drive a `Frame` in this exact order (it enforces the sequence at runtime):
+  `begin_frame(frame_index)` → `set_constants(&consts)` → `acquire(&surface)` → record your scene →
+  `tag(&mut tag_encoder, &resources)` → submit `[render, tag]` → `end_render()` → `present(tex)`.
+  `acquire` returns `(SurfaceTexture, back_buffer_index)` and performs the mandatory per-frame
+  `GetCurrentBackBufferIndex` call for you. The tag must be recorded on a **dedicated, raw-only**
+  command encoder (no wgpu passes), and `[render, tag]` must be submitted in that order.
+- **`query_state()`** decodes `slDLSSGGetState` into a `FrameGenerationState`; poll it periodically
+  (not every frame) to confirm DLSS-G is generating — a healthy result is `is_ok == true` with
+  `num_frames_actually_presented > 1`.
+
+```rust
+use dlss_wgpu_dx12::{
+    FgConstants, FgResource, FgResources, FrameGenerationContext, FrameGenerationOptions, Streamline,
+};
+use glam::UVec2;
+
+// 1. BEFORE creating the wgpu Instance.
+let mut streamline = Streamline::init()?;
+
+// 2. Create the wgpu Instance / surface / adapter / device as usual, THEN — after the device but
+//    BEFORE surface.configure() — bind the context.
+let options = FrameGenerationOptions::enabled().with_color_format(surface_format);
+let mut fg = FrameGenerationContext::new(&mut streamline, &device, &adapter, &options)?;
+surface.configure(&device, &config); // swapchain created here, with SL's device registration in place
+
+// 3. Per frame, in this exact order:
+let frame = fg.begin_frame(frame_index)?;
+let mut consts = FgConstants::new().with_pixel_motion(UVec2::new(width, height));
+consts.camera_motion_included = true;
+frame.set_constants(&consts)?;
+let (surface_tex, _bbi) = frame.acquire(&surface)?;
+// ... record your scene into surface_tex's view on a render encoder ...
+let mut tag_encoder = device.create_command_encoder(&Default::default()); // raw-only: no wgpu passes
+frame.tag(&mut tag_encoder, &FgResources {
+    depth: FgResource::new(&depth_tex),
+    motion_vectors: FgResource::new(&mvec_tex),
+    hudless_color: Some(FgResource::new(&hudless_tex)),
+    ui: None,
+})?;
+queue.submit([render_encoder.finish(), tag_encoder.finish()]); // [render, tag] in order
+frame.end_render();
+frame.present(surface_tex);
+drop(frame);
+
+// Periodically:
+let state = fg.query_state()?; // expect is_ok == true && num_frames_actually_presented > 1
+```
+
+### Runtime requirements
+
+DLSS-G is silent about most failures — it simply declines to generate frames. The following are
+**load-bearing**; each was proven to gate whether `numFramesActuallyPresented` flips from 1 to 2:
+
+1. **The window must be visible + focused / composited.** DLSS-G silently declines to present
+   generated frames to a window that is not actually being composited to the screen — do not
+   minimize it or cover it. A `Suboptimal` surface from `acquire` usually means exactly this.
+2. **Use a non-vsync present mode** (`Mailbox` or `Immediate`, not `Fifo`). Reflex/DLSS-G own the
+   frame pacing; hard vsync throttles the app's present rate and can suppress interpolation.
+3. **Stage the Streamline DLLs beside your executable:** `sl.interposer.dll`, `sl.common.dll`,
+   `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, and `nvngx_dlssg.dll`. Without them `slInit` /
+   DLSS-G load fails and no frames are generated. (See [docs/SETUP.md](docs/SETUP.md) for exact
+   sources and the loader-shim copies.)
+4. **Set the `STREAMLINE_SDK` environment variable** to the Streamline SDK root so the crate can
+   locate and signature-verify the interposer at runtime (`$STREAMLINE_SDK/bin/x64/sl.interposer.dll`).
+5. **Teardown order matters.** Disable Frame Generation and idle the GPU *before* destroying the
+   swapchain. Dropping the `FrameGenerationContext` does this for you (it runs
+   `slDLSSGSetOptions(Off)`, polls the device to idle, then `slShutdown`), so drop the context
+   before you tear down the surface/device. Note that the crate **leaks the interposer** — it is
+   never `FreeLibrary`'d — because NVIDIA's interposer installs process-wide DXGI/D3D hooks and is
+   not designed to be unloaded (`FreeLibrary`ing it access-violates). `slShutdown` performs the real
+   cleanup; the DLL staying resident until process exit is the expected, supported behavior.
+
+### Hardware
+
+Frame Generation needs an **NVIDIA RTX 40-series (Ada Lovelace) or newer** GPU for single-frame
+generation (classic 2x). It was hardware-validated on an RTX 4090, where the example reported
+`numFramesActuallyPresented == 2` (one generated frame between each pair of rendered frames). On
+unsupported hardware `FrameGenerationContext::new` returns `StreamlineError::FeatureNotSupported`.
+
+See **[examples/frame_generation.rs](examples/frame_generation.rs)** for a complete, runnable
+example: an animated window that drives the full per-frame sequence and prints the observed
+`numFramesActuallyPresented`.
 
 ## Cargo features
 
