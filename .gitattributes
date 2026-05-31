@@ -1,0 +1,13 @@
+# Normalize line endings; let git infer text vs binary.
+* text=auto
+
+# Patches must stay LF so `git apply` works on every platform / CI runner.
+*.patch text eol=lf
+
+# Explicit text types.
+*.rs   text
+*.toml text
+*.md   text
+*.yml  text
+*.h    text
+*.c    text

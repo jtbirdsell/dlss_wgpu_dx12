@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+
+# rustfmt backups
+**/*.rs.bk
+
+# MSVC debug symbols
+*.pdb
+
+# Editors / IDEs
+/.vscode/
+/.idea/
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# NOTE: Cargo.lock is intentionally committed — this crate ships examples/tests and pins a patched
+# wgpu, so a locked build keeps those reproducible.

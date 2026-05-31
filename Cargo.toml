@@ -1,0 +1,54 @@
+[package]
+name = "dlss_wgpu_dx12"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "NVIDIA DLSS (Super Resolution, Ray Reconstruction, Frame Generation) for wgpu's DX12 backend"
+repository = "https://github.com/jordantbirdsell/dlss_wgpu_dx12"
+keywords = ["dlss", "wgpu", "dx12", "upscaling", "nvidia"]
+categories = ["rendering", "graphics"]
+
+# Windows-only crate (wgpu Dx12 backend + NVIDIA NGX).
+[dependencies]
+# Local patched wgpu (adds dx12 raw_command_list/raw_device/raw_queue accessors; gfx-rs/wgpu#8888).
+# Consumers must apply the same patch (or wait for it to land upstream) in their workspace.
+wgpu = { path = "../wgpu/wgpu", default-features = false, features = ["dx12"] }
+# Only for the `windows_core::Interface::as_raw` trait + (later) FG swapchain types. Must unify
+# with the windows version wgpu-hal uses (0.62) so COM interface newtypes are ABI/type compatible.
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+glam = "0.29"
+uuid = "1"
+bitflags = "2"
+thiserror = "2"
+log = "0.4"
+
+[build-dependencies]
+bindgen = "0.72"
+cc = "1"
+
+[dev-dependencies]
+# Block on wgpu's async adapter/device requests in the headless test + example.
+pollster = "0.4"
+# v4 GUID generation for the project id in the headless test (merges with the crate's uuid dep).
+uuid = { version = "1", features = ["v4"] }
+
+[features]
+default = ["super-resolution"]
+# DLSS Super Resolution (raw NGX). The baseline upscaler.
+super-resolution = []
+# DLSS Ray Reconstruction / DLSS-D (raw NGX). Mutually exclusive with SR at runtime.
+ray-reconstruction = []
+# DLSS Frame Generation / DLSS-G via NVIDIA Streamline. EXPERIMENTAL, off by default;
+# requires owning the swapchain (see plan "Path C") and a runtime capability gate.
+frame-generation = []
+# Link the NGX dev/debug feature library + dev DLL search path (debug overlay). Never ship.
+debug_overlay = []
+
+# The Ray Reconstruction example only builds when its feature is enabled.
+[[example]]
+name = "ray_reconstruction"
+required-features = ["ray-reconstruction"]

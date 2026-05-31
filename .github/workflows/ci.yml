@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: check / clippy / build (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install LLVM (libclang, for bindgen)
+        run: choco install llvm --no-progress -y
+
+      # The crate depends on a patched wgpu as a SIBLING directory (../wgpu): the patch adds the
+      # dx12 CommandEncoder::raw_command_list accessor (gfx-rs/wgpu#8888). Vendor it here.
+      # NOTE: if the committed patch fails to apply (CRLF/line-ending drift), regenerate it from
+      # the v29.0.3 tag — see patches/README and docs/SETUP.md.
+      - name: Vendor patched wgpu (gfx-rs/wgpu#8888)
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v29.0.3 https://github.com/gfx-rs/wgpu.git "$env:GITHUB_WORKSPACE\..\wgpu"
+          git -C "$env:GITHUB_WORKSPACE\..\wgpu" apply --whitespace=nowarn "$env:GITHUB_WORKSPACE\patches\wgpu-29.0.3-dx12-raw-command-list.patch"
+
+      # The NGX headers + import libs come from a clone of NVIDIA/DLSS (uses git-lfs for the libs).
+      - name: Clone DLSS SDK
+        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git "$env:RUNNER_TEMP\dlss_sdk"
+
+      - name: cargo check
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: cargo check --features ray-reconstruction
+
+      - name: clippy
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: cargo clippy --all-targets --features ray-reconstruction -- -D warnings
+
+      # GitHub runners have no NVIDIA GPU, so DLSS cannot be executed here — only build/link the
+      # tests and examples (which links the NGX lib + system libs and validates bindgen output).
+      - name: Build tests + examples (do not run; no NVIDIA GPU on CI)
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          cargo test --no-run --features ray-reconstruction
+          cargo build --examples --features ray-reconstruction

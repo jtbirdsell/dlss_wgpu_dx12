@@ -1,0 +1,38 @@
+diff --git a/wgpu-hal/src/dx12/mod.rs b/wgpu-hal/src/dx12/mod.rs
+index ac520b2..36f0e0d 100644
+--- a/wgpu-hal/src/dx12/mod.rs
++++ b/wgpu-hal/src/dx12/mod.rs
+@@ -767,6 +767,9 @@ pub struct Device {
+     counters: Arc<wgt::HalCounters>,
+ }
+ 
++// NOTE: `Device::raw_device()` and `raw_queue()` already exist in dx12/device.rs (stock wgpu 29);
++// only `CommandEncoder::raw_command_list()` (added above) is the genuine #8888 gap.
++
+ impl Drop for Device {
+     fn drop(&mut self) {
+         self.rtv_pool.lock().free_handle(self.null_rtv_handle);
+@@ -924,6 +927,23 @@ pub struct CommandEncoder {
+     counters: Arc<wgt::HalCounters>,
+ }
+ 
++impl CommandEncoder {
++    /// Returns the raw D3D12 graphics command list currently being recorded, if any.
++    ///
++    /// The list is `Some` between [`crate::CommandEncoder::begin_encoding`] and
++    /// `end_encoding`/`discard_encoding`. This accessor exists to feed the in-progress
++    /// command list to external libraries such as NVIDIA NGX/DLSS (see gfx-rs/wgpu#8888).
++    ///
++    /// # Safety
++    ///
++    /// - The returned reference must not outlive the current encoding.
++    /// - The caller must not `Close` or `Reset` the list, change which list is current, or
++    ///   otherwise leave it in a state wgpu does not expect; recording must remain valid.
++    pub unsafe fn raw_command_list(&self) -> Option<&Direct3D12::ID3D12GraphicsCommandList> {
++        self.list.as_ref()
++    }
++}
++
+ unsafe impl Send for CommandEncoder {}
+ unsafe impl Sync for CommandEncoder {}
+ 
