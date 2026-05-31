@@ -11,8 +11,8 @@ env:
 jobs:
   windows:
     name: check / clippy / build (windows)
-    # Pinned (not windows-latest) for a stable image and to avoid the latest->2025 redirect notice.
-    runs-on: windows-2025
+    # Target the VS2026-based image directly to avoid the in-progress 2025 -> 2025-vs2026 redirect.
+    runs-on: windows-2025-vs2026
     steps:
       - name: Checkout
         uses: actions/checkout@v5
