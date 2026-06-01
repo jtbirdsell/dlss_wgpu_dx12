@@ -17,6 +17,13 @@ It currently provides:
   Streamline. Hardware-validated on an RTX 4090; has strict ordering and runtime requirements.
   See the [Frame Generation (experimental)](#frame-generation-experimental) section below.
 
+> **What's tested where.** CI proves the crate builds, lints, and that the mocked Frame-Generation
+> call-order state machine + pure logic behave. The real NGX **Super Resolution / Ray Reconstruction
+> evaluate** and the FG plumbing are exercised by automated but `#[ignore]`d **hardware** tests
+> (output-asserted, validated on one RTX 4090 — n=1). FG *generation* (`numFramesActuallyPresented`
+> 1 → 2) is manual. See **[docs/TESTING.md](docs/TESTING.md)** for the full validation matrix and how
+> to widen it.
+
 > **Windows only.** This crate targets the wgpu Dx12 backend and the NVIDIA NGX SDK, both of
 > which are Windows-only. Building on any other platform fails with a `compile_error!`. Use
 > [`dlss_wgpu`](https://github.com/JMS55/dlss_wgpu) (Vulkan) on other platforms.
