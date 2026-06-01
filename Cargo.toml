@@ -50,6 +50,10 @@ cc = "1"
 pollster = "0.4"
 # v4 GUID generation for the project id in the headless test (merges with the crate's uuid dep).
 uuid = { version = "1", features = ["v4"] }
+# The headless real-evaluate tests construct `glam::UVec2` for the public SR/RR context API. `glam`
+# is a normal dependency of the crate, but integration tests are a separate crate and need it as a
+# dev-dependency; Cargo unifies this with the crate's own `glam` (same version).
+glam = "0.29"
 # The frame_generation example needs a real, composited window (DLSS-G declines to present
 # generated frames to a non-composited window). The SR example is headless and does not use this.
 winit = "0.30"
