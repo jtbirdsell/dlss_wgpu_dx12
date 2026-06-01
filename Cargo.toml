@@ -7,6 +7,10 @@ description = "NVIDIA DLSS (Super Resolution, Ray Reconstruction, Frame Generati
 repository = "https://github.com/jtbirdsell/dlss_wgpu_dx12"
 keywords = ["dlss", "wgpu", "dx12", "upscaling", "nvidia"]
 categories = ["rendering", "graphics"]
+# Not yet publishable: `wgpu` is a git dependency (cargo publish rejects git/path deps) until the
+# raw_command_list accessor lands upstream (gfx-rs/wgpu#9613). Guard against an accidental publish;
+# flip this to `true` once the dependency resolves from crates.io. See docs/upstream-pr-8888.md.
+publish = false
 
 # Windows-only crate (wgpu Dx12 backend + NVIDIA NGX).
 [dependencies]

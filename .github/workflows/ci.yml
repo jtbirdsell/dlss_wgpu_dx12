@@ -25,14 +25,23 @@ jobs:
       - name: Install LLVM (libclang, for bindgen)
         run: choco install llvm --no-progress -y
 
+      # Cache the cargo registry + git sources + target dir. The dependency graph is heavy (the
+      # git-cloned wgpu fork, the full windows crate, bindgen), so a cold rebuild costs minutes per
+      # run. Keyed on Cargo.lock + the job; handles the git-dependency source cache.
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
       # wgpu is resolved straight from the pinned jtbirdsell/wgpu fork (rev d81d755) by Cargo.toml —
       # it already carries the dx12 raw_command_list accessor (gfx-rs/wgpu#8888) and the Streamline
       # factory-upgrade. There is no [patch]/path override, so the cargo steps below fetch and build
       # the exact wgpu a consumer pins; no local ../wgpu checkout is needed.
 
       # The NGX headers + import libs come from a clone of NVIDIA/DLSS (uses git-lfs for the libs).
-      - name: Clone DLSS SDK
-        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git "$env:RUNNER_TEMP\dlss_sdk"
+      # PINNED to a specific tag for reproducibility: an unpinned clone tracks the default branch, so
+      # an upstream SDK bump could silently change the bindgen output / FFI ABI on an unrelated PR.
+      # The crate targets the DLSS 4 / 310.x SDK; re-pin deliberately when moving NGX versions.
+      - name: Clone DLSS SDK (pinned)
+        run: git clone --depth 1 --branch v310.6.0 https://github.com/NVIDIA/DLSS.git "$env:RUNNER_TEMP\dlss_sdk"
 
       - name: cargo check
         shell: pwsh
@@ -65,6 +74,19 @@ jobs:
           DLSS_SDK: ${{ runner.temp }}\dlss_sdk
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: cargo clippy --all-targets --features frame-generation -- -D warnings
+
+      # The check/clippy steps above only exercise the ray-reconstruction and frame-generation
+      # feature sets. Also check the configs a default/edge consumer hits: the default (SR-only)
+      # set, the degenerate all-off set, and the dev-overlay feature (never shipped).
+      - name: cargo check (feature combinations)
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          cargo check
+          cargo check --no-default-features
+          cargo check --features debug_overlay
 
       # Run the headless unit tests. The mock-based Frame-Generation tests never load the interposer,
       # create a wgpu device, or touch a GPU, so they run on a GPU-less CI runner — they need only the

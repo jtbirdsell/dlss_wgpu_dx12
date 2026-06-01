@@ -13,12 +13,14 @@ The build script generates NGX bindings from, and links against, the NVIDIA DLSS
 point the `DLSS_SDK` environment variable at the clone:
 
 ```powershell
-git clone https://github.com/NVIDIA/DLSS C:/Users/<you>/dlss_sdk
+# Pin to the SDK version this crate targets (DLSS 4 / 310.x); CI pins the same tag.
+git clone --depth 1 --branch v310.6.0 https://github.com/NVIDIA/DLSS C:/Users/<you>/dlss_sdk
 $env:DLSS_SDK = 'C:/Users/<you>/dlss_sdk'
 ```
 
-The build expects the standard SDK layout (headers under `include/`, import libraries and the
-runtime DLLs under `lib/Windows_x86_64/`).
+The build expects the standard SDK layout: headers under `include/`, the import libraries under
+`lib/Windows_x86_64/x64/` (what `build.rs` links against), and the runtime DLLs under
+`lib/Windows_x86_64/rel/` (and `dev/`).
 
 ## 2. Install libclang (for bindgen)
 

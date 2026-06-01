@@ -1,0 +1,21 @@
+# EditorConfig (https://editorconfig.org) — baseline whitespace/charset conventions.
+# Line endings are intentionally left to git's autocrlf normalization, not pinned here.
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.rs]
+indent_size = 4
+max_line_length = 100
+
+[*.{yml,yaml,toml,json}]
+indent_size = 2
+
+[*.md]
+indent_size = 2
+# Markdown can use trailing whitespace for hard line breaks.
+trim_trailing_whitespace = false
