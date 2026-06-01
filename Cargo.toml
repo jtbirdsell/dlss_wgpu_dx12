@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "NVIDIA DLSS (Super Resolution, Ray Reconstruction, Frame Generation) for wgpu's DX12 backend"
-repository = "https://github.com/jordantbirdsell/dlss_wgpu_dx12"
+repository = "https://github.com/jtbirdsell/dlss_wgpu_dx12"
 keywords = ["dlss", "wgpu", "dx12", "upscaling", "nvidia"]
 categories = ["rendering", "graphics"]
 
