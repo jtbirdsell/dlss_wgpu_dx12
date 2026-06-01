@@ -5,15 +5,13 @@
 
 use crate::{
     DlssError, DlssFeatureFlags, DlssPerfQualityMode, DlssSdk, DlssTexture,
-    hal::with_raw_command_list,
-    jitter::halton_sequence,
+    ngx_feature::NgxFeature,
     nvsdk_ngx::*,
 };
 use glam::{UVec2, Vec2};
 use std::{
-    iter, mem,
+    mem,
     ops::RangeInclusive,
-    ptr,
     sync::{Arc, Mutex},
 };
 use wgpu::{TextureTransition, TextureUses};
@@ -117,13 +115,7 @@ impl<'a> DlssRayReconstructionParameters<'a> {
 
 /// A per-camera DLSS Ray Reconstruction feature. Cache and recreate only when settings change.
 pub struct DlssRayReconstructionContext {
-    upscaled_resolution: UVec2,
-    optimal_render_resolution: UVec2,
-    min_render_resolution: UVec2,
-    max_render_resolution: UVec2,
-    device: wgpu::Device,
-    sdk: Arc<Mutex<DlssSdk>>,
-    feature: *mut NVSDK_NGX_Handle,
+    feature: NgxFeature,
 }
 
 impl DlssRayReconstructionContext {
@@ -145,127 +137,110 @@ impl DlssRayReconstructionContext {
         let feature_flags = feature_flags
             | DlssFeatureFlags::HighDynamicRange
             | DlssFeatureFlags::LowResolutionMotionVectors;
-        let locked_sdk = sdk.lock().unwrap();
         let perf_quality_value = perf_quality_mode.as_perf_quality_value(upscaled_resolution);
 
-        let mut optimal = UVec2::ZERO;
-        let mut min = UVec2::ZERO;
-        let mut max = UVec2::ZERO;
-        unsafe {
-            let mut deprecated_sharpness = 0.0f32;
+        let feature = NgxFeature::create(
+            device,
+            queue,
+            sdk,
+            upscaled_resolution,
+            perf_quality_mode,
             // RR has its OWN optimal-settings call (distinct from SR's NGX_DLSS_GET_OPTIMAL_SETTINGS);
             // it primes RR-specific parameter state that NGX_D3D12_CREATE_DLSSD_EXT reads.
-            check_ngx_result(NGX_DLSSD_GET_OPTIMAL_SETTINGS(
-                locked_sdk.parameters,
-                upscaled_resolution.x,
-                upscaled_resolution.y,
-                perf_quality_value,
-                &mut optimal.x,
-                &mut optimal.y,
-                &mut max.x,
-                &mut max.y,
-                &mut min.x,
-                &mut min.y,
-                &mut deprecated_sharpness,
-            ))?;
-        }
-        if perf_quality_mode == DlssPerfQualityMode::Dlaa {
-            optimal = upscaled_resolution;
-            min = upscaled_resolution;
-            max = upscaled_resolution;
-        }
-
-        let mut create_params = NVSDK_NGX_DLSSD_Create_Params {
-            InDenoiseMode: NVSDK_NGX_DLSS_Denoise_Mode_NVSDK_NGX_DLSS_Denoise_Mode_DLUnified,
-            InRoughnessMode: match roughness_mode {
-                RoughnessMode::Unpacked => {
-                    NVSDK_NGX_DLSS_Roughness_Mode_NVSDK_NGX_DLSS_Roughness_Mode_Unpacked
+            |parameters| {
+                let mut optimal = UVec2::ZERO;
+                let mut min = UVec2::ZERO;
+                let mut max = UVec2::ZERO;
+                // SAFETY: out-params are valid locals; `parameters` is the locked NGX parameter block.
+                unsafe {
+                    let mut deprecated_sharpness = 0.0f32;
+                    check_ngx_result(NGX_DLSSD_GET_OPTIMAL_SETTINGS(
+                        parameters,
+                        upscaled_resolution.x,
+                        upscaled_resolution.y,
+                        perf_quality_value,
+                        &mut optimal.x,
+                        &mut optimal.y,
+                        &mut max.x,
+                        &mut max.y,
+                        &mut min.x,
+                        &mut min.y,
+                        &mut deprecated_sharpness,
+                    ))?;
                 }
-                RoughnessMode::Packed => {
-                    NVSDK_NGX_DLSS_Roughness_Mode_NVSDK_NGX_DLSS_Roughness_Mode_Packed
+                Ok((optimal, min, max))
+            },
+            // Pin the DLSS-4 render preset, then create the RR feature at the optimal resolution.
+            |cmd_list, resolutions, parameters, feature_out| {
+                let mut create_params = NVSDK_NGX_DLSSD_Create_Params {
+                    InDenoiseMode: NVSDK_NGX_DLSS_Denoise_Mode_NVSDK_NGX_DLSS_Denoise_Mode_DLUnified,
+                    InRoughnessMode: match roughness_mode {
+                        RoughnessMode::Unpacked => {
+                            NVSDK_NGX_DLSS_Roughness_Mode_NVSDK_NGX_DLSS_Roughness_Mode_Unpacked
+                        }
+                        RoughnessMode::Packed => {
+                            NVSDK_NGX_DLSS_Roughness_Mode_NVSDK_NGX_DLSS_Roughness_Mode_Packed
+                        }
+                    },
+                    InUseHWDepth: match depth_type {
+                        DepthType::Linear => {
+                            NVSDK_NGX_DLSS_Depth_Type_NVSDK_NGX_DLSS_Depth_Type_Linear
+                        }
+                        DepthType::Hardware => NVSDK_NGX_DLSS_Depth_Type_NVSDK_NGX_DLSS_Depth_Type_HW,
+                    },
+                    InWidth: resolutions.optimal.x,
+                    InHeight: resolutions.optimal.y,
+                    InTargetWidth: resolutions.upscaled.x,
+                    InTargetHeight: resolutions.upscaled.y,
+                    InPerfQualityValue: perf_quality_value,
+                    InFeatureCreateFlags: feature_flags.as_flags(),
+                    InEnableOutputSubrects: feature_flags.contains(DlssFeatureFlags::OutputSubrect),
+                };
+
+                // DLSS 4 (SDK 310.x) requires an explicit Ray Reconstruction render preset: the
+                // legacy A/B/C presets were removed and the implicit default is rejected with
+                // InvalidParameters. Pin every quality-mode hint to preset D (the DLSS-4 transformer
+                // model) before create.
+                let preset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D as u32;
+                // SAFETY: `parameters` is the locked NGX parameter block; `cmd_list`/`feature_out` are
+                // valid; `create_params` lives on the stack through the call.
+                unsafe {
+                    for key in [
+                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA.as_ptr(),
+                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality.as_ptr(),
+                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced.as_ptr(),
+                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance.as_ptr(),
+                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance
+                            .as_ptr(),
+                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality
+                            .as_ptr(),
+                    ] {
+                        NVSDK_NGX_Parameter_SetUI(parameters, key.cast(), preset);
+                    }
+                    NGX_D3D12_CREATE_DLSSD_EXT(
+                        cmd_list,
+                        1,
+                        1,
+                        feature_out,
+                        parameters,
+                        &mut create_params,
+                    )
                 }
             },
-            InUseHWDepth: match depth_type {
-                DepthType::Linear => NVSDK_NGX_DLSS_Depth_Type_NVSDK_NGX_DLSS_Depth_Type_Linear,
-                DepthType::Hardware => NVSDK_NGX_DLSS_Depth_Type_NVSDK_NGX_DLSS_Depth_Type_HW,
-            },
-            InWidth: optimal.x,
-            InHeight: optimal.y,
-            InTargetWidth: upscaled_resolution.x,
-            InTargetHeight: upscaled_resolution.y,
-            InPerfQualityValue: perf_quality_value,
-            InFeatureCreateFlags: feature_flags.as_flags(),
-            InEnableOutputSubrects: feature_flags.contains(DlssFeatureFlags::OutputSubrect),
-        };
-
-        // DLSS 4 (SDK 310.x) requires an explicit Ray Reconstruction render preset: the legacy
-        // A/B/C presets were removed and the implicit default is rejected with InvalidParameters.
-        // Pin every quality-mode hint to preset D (the DLSS-4 transformer model) before create.
-        let preset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D as u32;
-        unsafe {
-            for key in [
-                NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA.as_ptr(),
-                NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality.as_ptr(),
-                NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced.as_ptr(),
-                NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance.as_ptr(),
-                NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance.as_ptr(),
-                NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality.as_ptr(),
-            ] {
-                NVSDK_NGX_Parameter_SetUI(locked_sdk.parameters, key.cast(), preset);
-            }
-        }
-
-        let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dlss_rr_context_creation"),
-        });
-
-        let mut feature: *mut NVSDK_NGX_Handle = ptr::null_mut();
-        let created = unsafe {
-            with_raw_command_list(&mut command_encoder, |cmd_list| {
-                check_ngx_result(NGX_D3D12_CREATE_DLSSD_EXT(
-                    cmd_list,
-                    1,
-                    1,
-                    &mut feature,
-                    locked_sdk.parameters,
-                    &mut create_params,
-                ))
-            })
-        };
-        match created {
-            None => return Err(DlssError::FeatureNotSupported),
-            Some(result) => result?,
-        }
-
-        queue.submit([command_encoder.finish()]);
-        drop(locked_sdk);
-
-        Ok(Self {
-            upscaled_resolution,
-            optimal_render_resolution: optimal,
-            min_render_resolution: min,
-            max_render_resolution: max,
-            device: device.clone(),
-            sdk,
-            feature,
-        })
+        )?;
+        Ok(Self { feature })
     }
 
-    /// Evaluates Ray Reconstruction, submitting the work on `queue`.
-    ///
-    /// Submit scene rendering that produces the inputs before calling this. The transitions and the
-    /// NGX evaluate are recorded on separate internal encoders and submitted in order (see
-    /// [`crate::DlssContext::render`] for the rationale — wgpu 29 forbids mixing encoding APIs).
+    /// Evaluates DLSS Ray Reconstruction, submitting the work on `queue`.
     pub fn render(
         &mut self,
         params: DlssRayReconstructionParameters,
         queue: &wgpu::Queue,
     ) -> Result<(), DlssError> {
         params.validate()?;
-        let sdk = self.sdk.lock().unwrap();
         let partial = params
             .partial_texture_size
-            .unwrap_or(self.max_render_resolution);
+            .unwrap_or(self.feature.max_render_resolution());
         let mv_scale = params.motion_vector_scale.unwrap_or(Vec2::ONE);
 
         // The eval-params struct has ~89 (mostly optional) fields; zero-initialize and set only
@@ -289,88 +264,39 @@ impl DlssRayReconstructionContext {
         eval.InMVScaleX = mv_scale.x;
         eval.InMVScaleY = mv_scale.y;
 
-        // Separate encoders for the wgpu-tracked transitions and the raw NGX evaluate (see
-        // DlssContext::render); submitted transitions-first.
-        let mut barrier_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("dlss_rr_transitions"),
-                });
-        barrier_encoder.transition_resources(iter::empty(), params.barrier_list());
-
-        let mut eval_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("dlss_rr_evaluate"),
-                });
-        let evaluated = unsafe {
-            with_raw_command_list(&mut eval_encoder, |cmd_list| {
-                check_ngx_result(NGX_D3D12_EVALUATE_DLSSD_EXT(
-                    cmd_list,
-                    self.feature,
-                    sdk.parameters,
-                    &mut eval,
-                ))
+        self.feature
+            .evaluate(queue, params.barrier_list(), |cmd_list, feature, parameters| {
+                // SAFETY: `cmd_list`/`feature`/`parameters` are the open list, the live feature
+                // handle, and the locked NGX params; `eval` lives on the stack through the call.
+                unsafe { NGX_D3D12_EVALUATE_DLSSD_EXT(cmd_list, feature, parameters, &mut eval) }
             })
-        };
-        match evaluated {
-            None => return Err(DlssError::FeatureNotSupported),
-            Some(Err(e)) => return Err(e),
-            Some(Ok(())) => {}
-        }
-
-        queue.submit([barrier_encoder.finish(), eval_encoder.finish()]);
-        Ok(())
     }
 
     /// Suggested subpixel camera jitter (Halton sequence) for a given frame.
     pub fn suggested_jitter(&self, frame_number: u32, render_resolution: UVec2) -> Vec2 {
-        let ratio = self.upscaled_resolution.x as f32 / render_resolution.x as f32;
-        let phase_count = (8.0 * ratio * ratio) as u32;
-        let i = frame_number % phase_count.max(1);
-        Vec2 {
-            x: halton_sequence(i, 2),
-            y: halton_sequence(i, 3),
-        } - 0.5
+        self.feature.suggested_jitter(frame_number, render_resolution)
     }
 
     /// Suggested mip bias for sampling textures at the render resolution.
     pub fn suggested_mip_bias(&self, render_resolution: UVec2) -> f32 {
-        (render_resolution.x as f32 / self.upscaled_resolution.x as f32).log2() - 1.0
+        self.feature.suggested_mip_bias(render_resolution)
     }
 
     /// The upscaled (output) resolution.
     pub fn upscaled_resolution(&self) -> UVec2 {
-        self.upscaled_resolution
+        self.feature.upscaled_resolution()
     }
 
     /// The recommended (optimal) render resolution for the chosen quality mode, pre-upscaling. This is
     /// the resolution NGX was created with (`InWidth`/`InHeight`), so the caller must render here to
-    /// avoid a per-frame network recreate / suboptimal reconstruction. Use
+    /// avoid a per-frame feature recreate / suboptimal reconstruction. Use
     /// [`Self::render_resolution_range`] for dynamic scaling between min and max.
     pub fn render_resolution(&self) -> UVec2 {
-        self.optimal_render_resolution
+        self.feature.render_resolution()
     }
 
     /// Render-resolution range for dynamic resolution scaling.
     pub fn render_resolution_range(&self) -> RangeInclusive<UVec2> {
-        self.min_render_resolution..=self.max_render_resolution
+        self.feature.render_resolution_range()
     }
 }
-
-impl Drop for DlssRayReconstructionContext {
-    fn drop(&mut self) {
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        // Poison-tolerant: never double-panic across FFI in Drop (see DlssContext::drop).
-        let _sdk = self.sdk.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        unsafe {
-            if let Err(e) = check_ngx_result(NVSDK_NGX_D3D12_ReleaseFeature(self.feature)) {
-                log::error!("Failed to release DlssRayReconstructionContext feature: {e}");
-            }
-        }
-    }
-}
-
-// SAFETY: the raw NGX feature handle is only used while the owning SDK `Mutex` is held.
-unsafe impl Send for DlssRayReconstructionContext {}
-unsafe impl Sync for DlssRayReconstructionContext {}

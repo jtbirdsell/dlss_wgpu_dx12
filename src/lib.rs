@@ -25,6 +25,7 @@ mod feature_info;
 mod hal;
 mod instance;
 mod jitter;
+mod ngx_feature;
 mod ngx_log;
 mod nvsdk_ngx;
 #[cfg(feature = "ray-reconstruction")]
