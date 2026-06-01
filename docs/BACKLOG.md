@@ -24,13 +24,13 @@ docs-api-ergonomics 5 · performance-resources 3.
 
 ## Progress
 
-**16 of 39 done.** Completed (with the PR that landed them):
+**20 of 39 done.** Completed (with the PR that landed them):
 
 - **High:** H1 ✅ #9 · H2 ✅ #10
-- **Medium:** M1 ✅ #9 · M2 ✅ #9 · M4 ✅ #11
-- **Low:** L2 ✅ #9 · L13 ✅ #9 · L1 ✅ #10 · L8 ✅ #10 · L14 ✅ #10 · L20 ✅ #10 · L21 ✅ #10 · L3 ✅ #11 · L4 ✅ #11 · L18 ✅ #11 · L19 ✅ #11
+- **Medium:** M1 ✅ #9 · M2 ✅ #9 · M4 ✅ #11 · M9 ✅ #12 · M11 ✅ #12
+- **Low:** L2 ✅ #9 · L13 ✅ #9 · L1 ✅ #10 · L8 ✅ #10 · L14 ✅ #10 · L20 ✅ #10 · L21 ✅ #10 · L3 ✅ #11 · L4 ✅ #11 · L18 ✅ #11 · L19 ✅ #11 · L16 ✅ #12 · L17 ✅ #12
 
-Remaining work, grouped: structural/policy — M5 (SR/RR shared core), M6 (fork SPOF), M7 (cargo-deny + doc gate), MSRV/rustfmt, L9 (docs.rs); security depth — M8, L10, L15, L23; plus M3, M9, M10, M11, L5–L7, L11, L12, L16, L17, L22, L24, N1, N2. (Items below are not individually re-marked; cross-reference this list.)
+Remaining work, grouped: structural/policy — M5 (SR/RR shared core), M6 (fork SPOF), M7 (cargo-deny + doc gate), MSRV/rustfmt, L9 (docs.rs); security depth — M8, L10, L15, L23; plus M3, M10, L5–L7, L11, L12, L22, L24, N1, N2. (Items below are not individually re-marked; cross-reference this list.)
 
 ---
 

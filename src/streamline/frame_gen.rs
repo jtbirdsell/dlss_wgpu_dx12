@@ -60,6 +60,9 @@ pub const DEFAULT_ENGINE_VERSION: &str = "0.1.0";
 /// [`FrameGenerationContext::new`] *moves* the API into the context, so this handle's `Drop` then
 /// becomes a no-op (the context's `Drop` runs `slShutdown` instead). A *failed*
 /// `FrameGenerationContext::new` leaves this handle intact and reusable.
+///
+/// Independent of [`crate::DlssSdk`]: Frame Generation and SR/RR are separate NGX entry points with
+/// separate lifecycles. An app using both holds this handle *and* a `DlssSdk`.
 pub struct Streamline {
     api: Option<Box<dyn StreamlineApi>>,
 }

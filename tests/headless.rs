@@ -667,3 +667,52 @@ fn dlss_ray_reconstruction_evaluates_and_writes_output() {
     let pixels = read_back_rgba16f(&device, &queue, &output, upscaled);
     assert_ngx_wrote_output(&pixels, "RR");
 }
+
+/// Hardware / local-only: a DLAA context must render at the OUTPUT resolution (DLAA is
+/// anti-aliasing only — no upscaling), so `render_resolution()` and both ends of
+/// `render_resolution_range()` collapse to the upscaled resolution. Guards the DLAA branch + the H1
+/// fix (render_resolution returns the optimal NGX was created with) on real hardware.
+#[test]
+#[ignore = "hardware/local test: needs an NVIDIA RTX GPU + DLSS SDK; CI has no GPU"]
+fn dlss_dlaa_renders_at_output_resolution() {
+    use dlss_wgpu_dx12::{DlssContext, DlssFeatureFlags, DlssPerfQualityMode, DlssSdk};
+    use glam::UVec2;
+
+    let _guard = hardware_test_guard();
+    if !stage_ngx_dll("nvngx_dlss.dll") {
+        return;
+    }
+    let Some((device, queue)) = request_nvidia_dx12_device() else {
+        return;
+    };
+
+    let sdk = match DlssSdk::new(uuid::Uuid::new_v4(), device.clone()) {
+        Ok(sdk) => sdk,
+        Err(DlssError::FeatureNotSupported) => {
+            eprintln!("skipping: DLSS not supported on this device");
+            return;
+        }
+        Err(e) => panic!("DlssSdk::new must be Ok or FeatureNotSupported, got: {e}"),
+    };
+
+    let upscaled = UVec2::new(1920, 1080);
+    let context = DlssContext::new(
+        upscaled,
+        DlssPerfQualityMode::Dlaa,
+        DlssFeatureFlags::AutoExposure,
+        sdk,
+        &device,
+        &queue,
+    )
+    .expect("DLAA context creation should succeed");
+
+    assert_eq!(
+        context.render_resolution(),
+        upscaled,
+        "DLAA must render at the output resolution (no upscaling)"
+    );
+    let range = context.render_resolution_range();
+    assert_eq!(*range.start(), upscaled);
+    assert_eq!(*range.end(), upscaled);
+    eprintln!("DLAA render_resolution == {upscaled:?} (output); range is degenerate");
+}
