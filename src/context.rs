@@ -1,12 +1,10 @@
 use crate::{
     DlssError, DlssExposure, DlssFeatureFlags, DlssPerfQualityMode, DlssRenderParameters, DlssSdk,
-    hal::with_raw_command_list,
-    jitter::halton_sequence,
+    ngx_feature::NgxFeature,
     nvsdk_ngx::*,
 };
 use glam::{UVec2, Vec2};
 use std::{
-    iter,
     ops::RangeInclusive,
     ptr,
     sync::{Arc, Mutex},
@@ -17,13 +15,7 @@ use std::{
 /// Creating a context is expensive; cache it and only recreate it when settings (output
 /// resolution, perf/quality mode, or feature flags) change.
 pub struct DlssContext {
-    upscaled_resolution: UVec2,
-    optimal_render_resolution: UVec2,
-    min_render_resolution: UVec2,
-    max_render_resolution: UVec2,
-    device: wgpu::Device,
-    sdk: Arc<Mutex<DlssSdk>>,
-    feature: *mut NVSDK_NGX_Handle,
+    feature: NgxFeature,
 }
 
 impl DlssContext {
@@ -36,82 +28,66 @@ impl DlssContext {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<Self, DlssError> {
-        let locked_sdk = sdk.lock().unwrap();
         let perf_quality_value = perf_quality_mode.as_perf_quality_value(upscaled_resolution);
-
-        // Query the render-resolution range DLSS recommends for this output + quality mode.
-        let mut optimal = UVec2::ZERO;
-        let mut min = UVec2::ZERO;
-        let mut max = UVec2::ZERO;
-        unsafe {
-            let mut deprecated_sharpness = 0.0f32;
-            check_ngx_result(NGX_DLSS_GET_OPTIMAL_SETTINGS(
-                locked_sdk.parameters,
-                upscaled_resolution.x,
-                upscaled_resolution.y,
-                perf_quality_value,
-                &mut optimal.x,
-                &mut optimal.y,
-                &mut max.x,
-                &mut max.y,
-                &mut min.x,
-                &mut min.y,
-                &mut deprecated_sharpness,
-            ))?;
-        }
-        if perf_quality_mode == DlssPerfQualityMode::Dlaa {
-            optimal = upscaled_resolution;
-            min = upscaled_resolution;
-            max = upscaled_resolution;
-        }
-
-        let mut create_params = NVSDK_NGX_DLSS_Create_Params {
-            Feature: NVSDK_NGX_Feature_Create_Params {
-                InWidth: optimal.x,
-                InHeight: optimal.y,
-                InTargetWidth: upscaled_resolution.x,
-                InTargetHeight: upscaled_resolution.y,
-                InPerfQualityValue: perf_quality_value,
-            },
-            InFeatureCreateFlags: feature_flags.as_flags(),
-            InEnableOutputSubrects: feature_flags.contains(DlssFeatureFlags::OutputSubrect),
-        };
-
-        // NGX records initialization work onto a command list; use a throwaway encoder + submit.
-        let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dlss_context_creation"),
-        });
-
-        let mut feature: *mut NVSDK_NGX_Handle = ptr::null_mut();
-        let created = unsafe {
-            with_raw_command_list(&mut command_encoder, |cmd_list| {
-                check_ngx_result(NGX_D3D12_CREATE_DLSS_EXT(
-                    cmd_list,
-                    1, // CreationNodeMask (single-GPU)
-                    1, // VisibilityNodeMask
-                    &mut feature,
-                    locked_sdk.parameters,
-                    &mut create_params,
-                ))
-            })
-        };
-        match created {
-            None => return Err(DlssError::FeatureNotSupported), // encoder is not a Dx12 encoder
-            Some(result) => result?,
-        }
-
-        queue.submit([command_encoder.finish()]);
-        drop(locked_sdk);
-
-        Ok(Self {
-            upscaled_resolution,
-            optimal_render_resolution: optimal,
-            min_render_resolution: min,
-            max_render_resolution: max,
-            device: device.clone(),
+        let feature = NgxFeature::create(
+            device,
+            queue,
             sdk,
-            feature,
-        })
+            upscaled_resolution,
+            perf_quality_mode,
+            // Query the render-resolution range DLSS recommends for this output + quality mode.
+            |parameters| {
+                let mut optimal = UVec2::ZERO;
+                let mut min = UVec2::ZERO;
+                let mut max = UVec2::ZERO;
+                // SAFETY: the out-params are valid locals; `parameters` is the locked NGX parameter
+                // block (held by the caller for the duration of this closure).
+                unsafe {
+                    let mut deprecated_sharpness = 0.0f32;
+                    check_ngx_result(NGX_DLSS_GET_OPTIMAL_SETTINGS(
+                        parameters,
+                        upscaled_resolution.x,
+                        upscaled_resolution.y,
+                        perf_quality_value,
+                        &mut optimal.x,
+                        &mut optimal.y,
+                        &mut max.x,
+                        &mut max.y,
+                        &mut min.x,
+                        &mut min.y,
+                        &mut deprecated_sharpness,
+                    ))?;
+                }
+                Ok((optimal, min, max))
+            },
+            // Create the DLSS Super Resolution feature at the optimal render resolution.
+            |cmd_list, resolutions, parameters, feature_out| {
+                let mut create_params = NVSDK_NGX_DLSS_Create_Params {
+                    Feature: NVSDK_NGX_Feature_Create_Params {
+                        InWidth: resolutions.optimal.x,
+                        InHeight: resolutions.optimal.y,
+                        InTargetWidth: resolutions.upscaled.x,
+                        InTargetHeight: resolutions.upscaled.y,
+                        InPerfQualityValue: perf_quality_value,
+                    },
+                    InFeatureCreateFlags: feature_flags.as_flags(),
+                    InEnableOutputSubrects: feature_flags.contains(DlssFeatureFlags::OutputSubrect),
+                };
+                // SAFETY: `cmd_list`/`parameters` are the open list + locked params; `feature_out` is
+                // a valid out-param; `create_params` lives on the stack through the call.
+                unsafe {
+                    NGX_D3D12_CREATE_DLSS_EXT(
+                        cmd_list,
+                        1, // CreationNodeMask (single-GPU)
+                        1, // VisibilityNodeMask
+                        feature_out,
+                        parameters,
+                        &mut create_params,
+                    )
+                }
+            },
+        )?;
+        Ok(Self { feature })
     }
 
     /// Evaluates DLSS Super Resolution, submitting the work on `queue`.
@@ -127,11 +103,10 @@ impl DlssContext {
         queue: &wgpu::Queue,
     ) -> Result<(), DlssError> {
         render_parameters.validate()?;
-        let sdk = self.sdk.lock().unwrap();
 
         let partial_texture_size = render_parameters
             .partial_texture_size
-            .unwrap_or(self.max_render_resolution);
+            .unwrap_or(self.feature.max_render_resolution());
 
         let (exposure, exposure_scale, pre_exposure) = match &render_parameters.exposure {
             DlssExposure::Manual {
@@ -193,63 +168,32 @@ impl DlssContext {
             pInMotionVectorsReflections: ptr::null_mut(),
         };
 
-        // Resource transitions go through the wgpu API (its tracker knows the correct before-states)
-        // on a dedicated encoder; the NGX evaluate uses the raw command list on a SEPARATE encoder.
-        // wgpu 29 panics if both APIs touch one encoder, and `transition_resources` is deferred to
-        // `finish()`, so it must precede the evaluate in submission order rather than share its list.
-        let mut barrier_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("dlss_sr_transitions"),
-                });
-        barrier_encoder.transition_resources(iter::empty(), render_parameters.barrier_list());
-
-        let mut eval_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("dlss_sr_evaluate"),
-                });
-        let evaluated = unsafe {
-            with_raw_command_list(&mut eval_encoder, |cmd_list| {
-                check_ngx_result(NGX_D3D12_EVALUATE_DLSS_EXT(
-                    cmd_list,
-                    self.feature,
-                    sdk.parameters,
-                    &mut eval_params,
-                ))
-            })
-        };
-        match evaluated {
-            None => return Err(DlssError::FeatureNotSupported),
-            Some(Err(e)) => return Err(e),
-            Some(Ok(())) => {}
-        }
-
-        // Transitions first, then the evaluate, as one ordered submission.
-        queue.submit([barrier_encoder.finish(), eval_encoder.finish()]);
-        Ok(())
+        self.feature.evaluate(
+            queue,
+            render_parameters.barrier_list(),
+            |cmd_list, feature, parameters| {
+                // SAFETY: `cmd_list`/`feature`/`parameters` are the open list, the live feature
+                // handle, and the locked NGX params; `eval_params` lives on the stack through the call.
+                unsafe {
+                    NGX_D3D12_EVALUATE_DLSS_EXT(cmd_list, feature, parameters, &mut eval_params)
+                }
+            },
+        )
     }
 
     /// Suggested subpixel camera jitter (Halton sequence) for a given frame.
     pub fn suggested_jitter(&self, frame_number: u32, render_resolution: UVec2) -> Vec2 {
-        let ratio = self.upscaled_resolution.x as f32 / render_resolution.x as f32;
-        let phase_count = (8.0 * ratio * ratio) as u32;
-        let i = frame_number % phase_count.max(1);
-
-        Vec2 {
-            x: halton_sequence(i, 2),
-            y: halton_sequence(i, 3),
-        } - 0.5
+        self.feature.suggested_jitter(frame_number, render_resolution)
     }
 
     /// Suggested mip bias for sampling textures at the render resolution.
     pub fn suggested_mip_bias(&self, render_resolution: UVec2) -> f32 {
-        (render_resolution.x as f32 / self.upscaled_resolution.x as f32).log2() - 1.0
+        self.feature.suggested_mip_bias(render_resolution)
     }
 
     /// The upscaled (output) resolution DLSS will produce.
     pub fn upscaled_resolution(&self) -> UVec2 {
-        self.upscaled_resolution
+        self.feature.upscaled_resolution()
     }
 
     /// The recommended (optimal) render resolution for the chosen quality mode, pre-upscaling. This
@@ -257,32 +201,11 @@ impl DlssContext {
     /// to avoid a per-frame feature recreate / suboptimal reconstruction. Use
     /// [`Self::render_resolution_range`] for dynamic scaling between min and max.
     pub fn render_resolution(&self) -> UVec2 {
-        self.optimal_render_resolution
+        self.feature.render_resolution()
     }
 
     /// Render-resolution range for dynamic resolution scaling.
     pub fn render_resolution_range(&self) -> RangeInclusive<UVec2> {
-        self.min_render_resolution..=self.max_render_resolution
+        self.feature.render_resolution_range()
     }
 }
-
-impl Drop for DlssContext {
-    fn drop(&mut self) {
-        // Wait for the GPU to finish using the feature before releasing it.
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        // Never panic across the FFI boundary in Drop. A `.unwrap()` here would panic on a poisoned
-        // mutex (e.g. a prior panic while another context held the lock during NGX FFI), turning into
-        // a double-panic -> process abort during unwind. Recover the guard instead: a poisoned lock
-        // does not invalidate the NGX parameter pointer, so ReleaseFeature can still run.
-        let _sdk = self.sdk.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        unsafe {
-            if let Err(e) = check_ngx_result(NVSDK_NGX_D3D12_ReleaseFeature(self.feature)) {
-                log::error!("Failed to release DlssContext feature: {e}");
-            }
-        }
-    }
-}
-
-// SAFETY: the raw NGX feature handle is only used while the owning SDK `Mutex` is held.
-unsafe impl Send for DlssContext {}
-unsafe impl Sync for DlssContext {}
