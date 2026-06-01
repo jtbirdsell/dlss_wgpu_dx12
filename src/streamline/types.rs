@@ -57,7 +57,9 @@ pub enum StreamlineError {
     /// `LoadLibrary`/`libloading` failed to load the (verified) interposer DLL.
     #[error("failed to load sl.interposer.dll from {path}: {source}")]
     LibraryLoadFailed {
+        /// The interposer path that failed to load.
         path: std::path::PathBuf,
+        /// The underlying `libloading` error.
         #[source]
         source: libloading::Error,
     },
@@ -65,7 +67,9 @@ pub enum StreamlineError {
     /// A required exported `sl*` symbol was missing from the interposer.
     #[error("missing exported Streamline symbol {symbol:?}: {source}")]
     MissingExport {
+        /// The exported `sl*` symbol name that was missing.
         symbol: String,
+        /// The underlying `libloading` error.
         #[source]
         source: libloading::Error,
     },
@@ -75,8 +79,11 @@ pub enum StreamlineError {
     /// function that later returns non-Ok surfaces as [`StreamlineError::SlCall`].
     #[error("slGetFeatureFunction(feature={feature}, {function:?}) failed: {detail}")]
     FeatureFunctionUnavailable {
+        /// The Streamline feature the function belongs to.
         feature: Feature,
+        /// The feature-function name that failed to resolve.
         function: String,
+        /// Detail about why resolution failed.
         detail: String,
     },
 
@@ -941,3 +948,33 @@ const _: () = {
     assert!(core::mem::offset_of!(Preferences, flags) == 88);
     assert!(core::mem::offset_of!(Preferences, render_api) == 136);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::dlssg_status;
+
+    // `dlssg_status::decode` turns the DLSS-G status bitfield into the operator-facing diagnostic
+    // string — often the only signal for why FG silently isn't generating on hardware a maintainer
+    // may not have. Guard its multi-bit join and unknown-bit fallback, not just the single-bit path.
+    #[test]
+    fn decode_ok_is_eok() {
+        assert_eq!(dlssg_status::decode(dlssg_status::OK), "eOk");
+    }
+
+    #[test]
+    fn decode_joins_multiple_bits() {
+        let s = dlssg_status::decode(
+            dlssg_status::FAIL_RESOLUTION_TOO_LOW | dlssg_status::FAIL_HDR_FORMAT_NOT_SUPPORTED,
+        );
+        assert!(s.contains("eFailResolutionTooLow"), "{s}");
+        assert!(s.contains("eFailHDRFormatNotSupported"), "{s}");
+        assert!(s.contains(" | "), "{s}");
+    }
+
+    #[test]
+    fn decode_unknown_bit_is_unknown_form() {
+        // A high/undocumented bit no token covers falls back to the hex "unknown" form.
+        let s = dlssg_status::decode(1 << 20);
+        assert!(s.starts_with("<unknown status"), "{s}");
+    }
+}

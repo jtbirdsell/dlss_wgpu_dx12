@@ -13,6 +13,8 @@
 //! building, and ship the appropriate `nvngx_dlss*.dll` next to your executable at runtime.
 //! See the README for full instructions.
 
+#![deny(missing_docs)]
+
 #[cfg(not(windows))]
 compile_error!(
     "dlss_wgpu_dx12 supports Windows + the wgpu Dx12 backend only; use dlss_wgpu (Vulkan) on other platforms."

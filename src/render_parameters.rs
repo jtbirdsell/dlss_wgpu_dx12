@@ -10,6 +10,8 @@ use wgpu::{Texture, TextureTransition, TextureUses};
 /// needed.
 #[derive(Clone, Copy)]
 pub struct DlssTexture<'a> {
+    /// The wgpu texture bound to NGX as a DLSS input or output. Its raw `ID3D12Resource` is extracted
+    /// at the FFI boundary; it must be a DX12 texture from the same device as the DLSS context.
     pub texture: &'a Texture,
 }
 
@@ -26,8 +28,11 @@ impl<'a> DlssTexture<'a> {
 pub enum DlssExposure<'a> {
     /// Exposure controlled by the application via a 1x1 exposure texture.
     Manual {
+        /// A 1x1 exposure texture supplied by the application.
         exposure: DlssTexture<'a>,
+        /// Optional multiplier applied to the exposure value (defaults to 1.0).
         exposure_scale: Option<f32>,
+        /// Optional pre-exposure already baked into the color (defaults to 0.0).
         pre_exposure: Option<f32>,
     },
     /// Auto-exposure handled by DLSS (requires [`crate::DlssFeatureFlags::AutoExposure`]).
