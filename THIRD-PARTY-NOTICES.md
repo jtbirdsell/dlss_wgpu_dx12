@@ -79,5 +79,7 @@ This file is informational and is **not legal advice**; consult the actual NVIDI
 ## wgpu
 
 This crate currently depends on a locally patched build of [`wgpu`](https://github.com/gfx-rs/wgpu)
-(MIT OR Apache-2.0) that adds a `dx12::CommandEncoder::raw_command_list()` accessor; see
-`patches/` and `docs/SETUP.md`. No wgpu source is redistributed by this crate.
+(MIT OR Apache-2.0) that adds a `dx12::CommandEncoder::raw_command_list()` accessor plus a Streamline
+factory-upgrade for Frame Generation; see `patches/`, `docs/SETUP.md`, and `docs/upstream-pr-8888.md`
+(upstreaming status / the path to a fork-free dependency). No wgpu source is redistributed by this
+crate.

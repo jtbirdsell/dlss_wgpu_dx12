@@ -116,7 +116,9 @@ exclusive with SR for a given upscale pass — create *either* a `DlssContext` *
 > `Instance::init` (only when `sl.interposer.dll` is already loaded), so wgpu's own swapchain
 > becomes the SL proxy that drives DLSS-G. This feature has strict ordering and runtime
 > requirements; read all of them before integrating. Validated on an RTX 4090
-> (`numFramesActuallyPresented == 2`).
+> (`numFramesActuallyPresented == 2`). The wgpu fork is **transitional** — see
+> [`docs/upstream-pr-8888.md`](docs/upstream-pr-8888.md) for the upstreaming status and the path to a
+> fork-free dependency.
 
 ### API flow
 

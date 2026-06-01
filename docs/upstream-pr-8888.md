@@ -1,58 +1,44 @@
-# Upstreaming the wgpu DX12 `raw_command_list` accessor (gfx-rs/wgpu#8888)
+# Upstreaming status: removing the wgpu fork
 
-This crate vendors a one-accessor patch to `wgpu-hal` (see `patches/`). To remove the vendoring,
-upstream it. **This requires your GitHub account** — the steps below are ready to run; nothing here
-pushes on your behalf.
+`dlss_wgpu_dx12` currently depends on a small wgpu fork (`jtbirdsell/wgpu`, pinned by `rev` in
+`Cargo.toml`) that carries two additive patches over stock wgpu 29.0.3. This document tracks the work
+to upstream both so the crate can eventually depend on released wgpu with **no fork**.
 
-## The change
+## Patch 1 — `dx12::CommandEncoder::raw_command_list()` (gfx-rs/wgpu#8888)
 
-`wgpu_hal::dx12::CommandEncoder` keeps its recording `ID3D12GraphicsCommandList` in a private field
-with no accessor, so external libraries (NVIDIA NGX/DLSS, AMD FidelityFX, …) cannot record onto the
-in-flight list. Vulkan's `CommandEncoder` already exposes `raw_handle()`; this adds the DX12
-equivalent:
+A read accessor exposing the recording `ID3D12GraphicsCommandList`, needed by SR, RR, and FG to record
+NGX/Streamline work onto wgpu's in-flight command list (via `as_hal_mut`).
 
-```rust
-// wgpu-hal/src/dx12/mod.rs — inherent `impl CommandEncoder`
-/// Returns the raw D3D12 graphics command list currently being recorded, if any.
-/// `Some` between `begin_encoding` and `end_encoding`/`discard_encoding`.
-/// # Safety
-/// The reference must not outlive the current encoding; the caller must not Close/Reset the list.
-pub unsafe fn raw_command_list(&self) -> Option<&Direct3D12::ID3D12GraphicsCommandList> {
-    self.list.as_ref()
-}
-```
+- **Status: PR open — [gfx-rs/wgpu#9613](https://github.com/gfx-rs/wgpu/pull/9613).** Re-authored
+  against trunk; mirrors the existing `Buffer::raw_resource` / `Fence::raw_fence` accessors. #8888 was
+  filed independently (for AMD FidelityFX), so the accessor is broadly useful.
+- **When it merges + ships:** Super Resolution and Ray Reconstruction no longer need the fork — point
+  `Cargo.toml` at the released wgpu; FG-only consumers keep the fork via `[patch.crates-io]`.
 
-(`Device::raw_device()` / `raw_queue()` already exist upstream, so no change is needed there.)
+## Patch 2 — Streamline factory-upgrade in `dx12::Instance::init` (DLSS Frame Generation)
 
-## PR metadata
+`wgpu-hal/src/dx12/streamline.rs` swaps wgpu's DXGI factory for a Streamline proxy (`slUpgradeInterface`)
+immediately after creation, when `sl.interposer.dll` is loaded — a runtime-guarded no-op otherwise.
+This is what lets DLSS-G hook `Present`. It is **NVIDIA-specific, so not upstreamable as-is** (vendor
+code does not belong in wgpu's generic Instance init).
 
-- **Title:** `[hal/dx12] Add CommandEncoder::raw_command_list() accessor (#8888)`
-- **Body:**
-  > Exposes the recording `ID3D12GraphicsCommandList` from `dx12::CommandEncoder`, mirroring the
-  > Vulkan backend's `CommandEncoder::raw_handle()`. This unblocks `as_hal_mut`-based interop with
-  > native libraries that must record onto wgpu's in-flight command list (NVIDIA NGX/DLSS, AMD
-  > FidelityFX, etc.). The accessor is `unsafe` and documented with the encoding-lifetime contract.
-  > Fixes #8888.
-- Add a `CHANGELOG.md` entry under the unreleased section.
+- **Status: design-validation issue open — [gfx-rs/wgpu#9614](https://github.com/gfx-rs/wgpu/issues/9614).**
+  It proposes a *vendor-neutral* dx12 factory-customization hook (mirroring the merged Vulkan
+  `Instance::init_with_callback` / `Adapter::open_with_callback`, #7829) so the proxy install can live
+  in this crate's code instead of a fork. Validating the design first, per wgpu's CONTRIBUTING.
+- **If maintainers are receptive:** implement the agreed hook as a wgpu PR; then migrate the
+  `slUpgradeInterface` call out of the fork into `src/streamline/` (invoked via the hook when the
+  consumer builds the `wgpu::Instance`), delete `streamline.rs` from the fork, and repoint `Cargo.toml`
+  at released wgpu.
 
-## Steps (run yourself)
+## End state
 
-The change is already in your working tree at `../wgpu`. Upstream targets **trunk**, not the
-`v29.0.3` tag, so rebase the edit onto a fresh trunk checkout:
+No fork: SR/RR on released wgpu (patch 1 upstreamed), FG installing the Streamline proxy via the
+upstream factory hook (patch 2 replaced by an upstream mechanism). This also unblocks crates.io
+publishing, which the current git dependency precludes.
 
-```sh
-gh repo fork gfx-rs/wgpu --clone   # or fork in the UI and clone your fork
-cd wgpu
-git checkout -b dx12-raw-command-list
-# Re-apply the accessor to wgpu-hal/src/dx12/mod.rs (inherent impl CommandEncoder).
-# The exact text is in ../dlss_wgpu_dx12/patches/wgpu-29.0.3-dx12-raw-command-list.patch
-# (the surrounding code is unchanged on trunk as of 29.0.3, so `git apply` usually works:)
-git apply ../dlss_wgpu_dx12/patches/wgpu-29.0.3-dx12-raw-command-list.patch
-# add a CHANGELOG.md entry, then:
-git commit -am "[hal/dx12] Add CommandEncoder::raw_command_list() accessor (#8888)"
-git push -u origin dx12-raw-command-list
-gh pr create --repo gfx-rs/wgpu --title "[hal/dx12] Add CommandEncoder::raw_command_list() accessor (#8888)" --body-file -  # paste the body above
-```
+## Re-validation
 
-Once merged and released, drop the `patches/` vendoring and point `wgpu` in `Cargo.toml` back at
-crates.io (the accessor will be available on stock wgpu).
+After migrating off the fork, re-run `examples/frame_generation.rs` on an RTX 40-series (Ada) or newer
+GPU and confirm DLSS-G still reaches `numFramesActuallyPresented == 2` with the proxy installed via the
+upstream hook, and that crate CI stays green against released wgpu.
