@@ -6,8 +6,16 @@ fn main() {
         "DLSS_SDK environment variable not set. Point it at a clone of github.com/NVIDIA/DLSS \
          (so that $DLSS_SDK/include/nvsdk_ngx.h exists). See the crate README.",
     );
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_dir =
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set; build.rs must be run by Cargo"));
     let include = format!("{dlss_sdk}/include");
+    // Fail early with the same actionable DLSS_SDK guidance if the headers are missing, rather than
+    // letting bindgen surface an opaque libclang "file not found" further down.
+    assert!(
+        PathBuf::from(&include).join("nvsdk_ngx.h").exists(),
+        "NGX headers not found at {include}/nvsdk_ngx.h. Point DLSS_SDK at a complete NVIDIA/DLSS \
+         clone (so that $DLSS_SDK/include/nvsdk_ngx.h exists). See the crate README.",
+    );
 
     // --- Link the NGX import library --------------------------------------------------------
     // One library serves all graphics backends. Selection is by CRT linkage:
