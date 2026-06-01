@@ -6,6 +6,8 @@ All notable changes to `dlss_wgpu_dx12` are documented here. The format is based
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-31
+
 ### Added
 - DLSS **Super Resolution** for the wgpu DX12 backend: `DlssSdk`, `DlssContext`,
   `DlssRenderParameters`, `DlssTexture`, `DlssExposure`, `DlssPerfQualityMode`, `DlssFeatureFlags`.
@@ -28,14 +30,28 @@ All notable changes to `dlss_wgpu_dx12` are documented here. The format is based
   via `STREAMLINE_SDK` and the SL plugin DLLs + `nvngx_dlssg.dll` must be staged beside the exe. See
   the README's Frame Generation section, `docs/SETUP.md` §5, and `examples/frame_generation.rs`.
 - Opt-in **DXC** instance helpers: `dxc_instance_descriptor`, `dxc_instance_descriptor_at`.
-- Headless integration test, Super Resolution + Ray Reconstruction examples, an interactive
-  animated Frame Generation example (`examples/frame_generation.rs`), and Windows CI
-  (check / clippy `-D warnings` / build-tests).
+- **SR + FG interop bridge**: `FgConstants::from_render_parameters` (and
+  `from_ray_reconstruction_parameters`) derive the Frame Generation per-frame constants from the
+  *same* `DlssRenderParameters` used for the NGX evaluate, giving one source of jitter, history
+  reset, and motion-vector scale across SR and FG — and converting the motion-vector convention
+  (NGX render-resolution pixels ↔ Streamline normalized `[-1, 1]`).
+- NGX diagnostics are forwarded to the [`log`](https://docs.rs/log) crate (target
+  `dlss_wgpu_dx12::ngx`); the minimum level tracks the active `log` filter (silent by default).
+- Examples: headless Super Resolution + Ray Reconstruction; an interactive animated Frame
+  Generation example (`examples/frame_generation.rs`, with `--ui` for DLSS-G UI recomposition); a
+  combined SR + FG pipeline (`examples/sr_plus_fg.rs`); dynamic-resolution scaling
+  (`examples/dynamic_resolution.rs`); a DLAA toggle (`super_resolution --dlaa`); and a runtime
+  SR↔RR toggle (`examples/sr_rr_toggle.rs`).
+- Headless integration test, unit tests (the SR→FG motion-vector-scale conversion, the Halton
+  jitter sequence, and the NGX result-code / perf-quality mapping), and Windows CI
+  (check / clippy `-D warnings` / build-tests across the feature matrix, including
+  `frame-generation`).
 
 ### Notes
 - **Frame Generation** (`frame-generation` feature) is **experimental**: it requires NVIDIA
   Streamline, an RTX 40-series (Ada) or newer GPU, a visible/composited window, a non-vsync present
   mode, the SL DLLs staged beside the exe, and `STREAMLINE_SDK` set. It compiles in CI but can only
   be verified on RTX hardware + a display. See `docs/SETUP.md` §5 for the build/run setup.
-- Until [gfx-rs/wgpu#8888](https://github.com/gfx-rs/wgpu/issues/8888) lands upstream, builds require
-  a patched wgpu (`dx12::CommandEncoder::raw_command_list`); see `patches/` and `docs/SETUP.md`.
+- Until [gfx-rs/wgpu#8888](https://github.com/gfx-rs/wgpu/issues/8888) lands upstream
+  (PR [gfx-rs/wgpu#9613](https://github.com/gfx-rs/wgpu/pull/9613)), builds require a patched wgpu
+  (`dx12::CommandEncoder::raw_command_list`); see `patches/` and `docs/SETUP.md`.
