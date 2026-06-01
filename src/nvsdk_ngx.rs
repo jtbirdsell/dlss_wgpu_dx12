@@ -187,3 +187,80 @@ pub fn check_ngx_result(result: NVSDK_NGX_Result) -> Result<(), DlssError> {
         other => Other(other),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_ngx_result_maps_known_and_unknown_codes() {
+        // Success → Ok.
+        assert!(check_ngx_result(NVSDK_NGX_Result_NVSDK_NGX_Result_Success).is_ok());
+        // A couple of distinct failures map to distinct variants (guards against a catch-all
+        // collapse — the double-prefix footgun this fn's comment warns about).
+        assert!(matches!(
+            check_ngx_result(NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_FeatureNotSupported),
+            Err(DlssError::FeatureNotSupported)
+        ));
+        assert!(matches!(
+            check_ngx_result(NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_InvalidParameter),
+            Err(DlssError::InvalidParameters)
+        ));
+        // An unknown code is carried as Other(code), never panics.
+        let unknown: NVSDK_NGX_Result = 0xDEAD;
+        assert!(matches!(
+            check_ngx_result(unknown),
+            Err(DlssError::Other(c)) if c == unknown
+        ));
+    }
+
+    #[test]
+    fn perf_quality_fixed_modes_map_correctly() {
+        let res = UVec2::new(3840, 2160); // value is irrelevant for the non-Auto modes
+        assert_eq!(
+            DlssPerfQualityMode::Dlaa.as_perf_quality_value(res),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_DLAA
+        );
+        assert_eq!(
+            DlssPerfQualityMode::Quality.as_perf_quality_value(res),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_MaxQuality
+        );
+        assert_eq!(
+            DlssPerfQualityMode::Balanced.as_perf_quality_value(res),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_Balanced
+        );
+        assert_eq!(
+            DlssPerfQualityMode::Performance.as_perf_quality_value(res),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_MaxPerf
+        );
+        assert_eq!(
+            DlssPerfQualityMode::UltraPerformance.as_perf_quality_value(res),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_UltraPerformance
+        );
+    }
+
+    #[test]
+    fn perf_quality_auto_megapixel_ladder() {
+        let auto = DlssPerfQualityMode::Auto;
+        // 1280x720 = 0.92 MP (< 2.03) → DLAA.
+        assert_eq!(
+            auto.as_perf_quality_value(UVec2::new(1280, 720)),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_DLAA
+        );
+        // 1920x1080 = 2.07 MP (2.03..3.68) → MaxQuality.
+        assert_eq!(
+            auto.as_perf_quality_value(UVec2::new(1920, 1080)),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_MaxQuality
+        );
+        // 3840x1600 = 6.14 MP (3.68..8.29) → MaxPerf.
+        assert_eq!(
+            auto.as_perf_quality_value(UVec2::new(3840, 1600)),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_MaxPerf
+        );
+        // 3840x2160 = 8.29 MP (>= 8.29) → UltraPerformance.
+        assert_eq!(
+            auto.as_perf_quality_value(UVec2::new(3840, 2160)),
+            NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_UltraPerformance
+        );
+    }
+}

@@ -346,3 +346,47 @@ pub(crate) fn dxgi_format_of(format: wgpu::TextureFormat) -> u32 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::FgConstants;
+    use glam::{UVec2, Vec2};
+
+    fn approx(a: Vec2, b: Vec2) {
+        assert!(
+            (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6,
+            "expected {b:?}, got {a:?}"
+        );
+    }
+
+    #[test]
+    fn with_pixel_motion_is_reciprocal_resolution() {
+        let c = FgConstants::new().with_pixel_motion(UVec2::new(800, 600));
+        approx(c.mvec_scale, Vec2::new(1.0 / 800.0, 1.0 / 600.0));
+    }
+
+    #[test]
+    fn from_sr_params_converts_pixel_mvec_scale_to_normalized() {
+        // SR motion-vector scale (2,2) in render-resolution pixels, render 1000x500 → FG normalized
+        // mvec_scale = sr_scale / render_resolution = (2/1000, 2/500) = (0.002, 0.004). Jitter and
+        // reset are carried through verbatim.
+        let c = FgConstants::derive(
+            Some(Vec2::new(2.0, 2.0)),
+            Vec2::new(0.3, 0.7),
+            true,
+            UVec2::new(1000, 500),
+        );
+        approx(c.mvec_scale, Vec2::new(0.002, 0.004));
+        approx(c.jitter_offset, Vec2::new(0.3, 0.7));
+        assert!(c.reset);
+    }
+
+    #[test]
+    fn from_sr_params_none_scale_defaults_to_one_over_resolution() {
+        // No explicit SR scale (mvecs already in render-res pixels) → FG (1/w, 1/h), i.e. identical
+        // to with_pixel_motion.
+        let c = FgConstants::derive(None, Vec2::ZERO, false, UVec2::new(1920, 1080));
+        approx(c.mvec_scale, Vec2::new(1.0 / 1920.0, 1.0 / 1080.0));
+        assert!(!c.reset);
+    }
+}

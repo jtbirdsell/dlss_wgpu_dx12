@@ -31,10 +31,12 @@ where
             Length: shared_library_paths.len() as u32,
         },
         InternalData: ptr::null_mut(),
-        // TODO(enterprise): wire LoggingCallback into the `log` crate behind a configurable level.
+        // NGX diagnostics are forwarded to the `log` crate (target `dlss_wgpu_dx12::ngx`); the
+        // minimum level tracks the active `log` filter (e.g. `RUST_LOG`), so this is silent unless
+        // the host enables logging. See [`crate::ngx_log`].
         LoggingInfo: NVSDK_NGX_LoggingInfo {
-            LoggingCallback: None,
-            MinimumLoggingLevel: NVSDK_NGX_Logging_Level_NVSDK_NGX_LOGGING_LEVEL_OFF,
+            LoggingCallback: Some(crate::ngx_log::ngx_log_callback),
+            MinimumLoggingLevel: crate::ngx_log::min_logging_level(),
             DisableOtherLoggingSinks: false,
         },
     };

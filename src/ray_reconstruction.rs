@@ -6,6 +6,7 @@
 use crate::{
     DlssError, DlssFeatureFlags, DlssPerfQualityMode, DlssSdk, DlssTexture,
     hal::with_raw_command_list,
+    jitter::halton_sequence,
     nvsdk_ngx::*,
 };
 use glam::{UVec2, Vec2};
@@ -345,14 +346,3 @@ impl Drop for DlssRayReconstructionContext {
 // SAFETY: the raw NGX feature handle is only used while the owning SDK `Mutex` is held.
 unsafe impl Send for DlssRayReconstructionContext {}
 unsafe impl Sync for DlssRayReconstructionContext {}
-
-fn halton_sequence(mut index: u32, base: u32) -> f32 {
-    let mut f = 1.0;
-    let mut result = 0.0;
-    while index > 0 {
-        f /= base as f32;
-        result += f * (index % base) as f32;
-        index = (index as f32 / base as f32).floor() as u32;
-    }
-    result
-}
