@@ -18,9 +18,13 @@ pub enum DlssPerfQualityMode {
     Auto,
     /// Anti-aliasing only, no upscaling.
     Dlaa,
+    /// Highest quality: the smallest upscale factor.
     Quality,
+    /// Balanced quality and performance.
     Balanced,
+    /// Higher performance: a larger upscale factor.
     Performance,
+    /// Maximum performance: the largest upscale factor.
     UltraPerformance,
 }
 
@@ -87,67 +91,86 @@ impl DlssFeatureFlags {
     }
 }
 
-/// Errors returned by DLSS / the NGX SDK.
+/// Errors returned by DLSS / the NGX SDK. Each variant maps an `NVSDK_NGX_Result_FAIL_*` code; see
+/// the `Display` text (`#[error]`) for the full NGX description.
 #[derive(thiserror::Error, Debug)]
 pub enum DlssError {
+    /// The NGX SDK or the requested feature is not supported on this system / hardware / graphics API.
     #[error(
         "The NGX SDK or a specific feature is not supported by the current system, hardware, and/or graphics API."
     )]
     FeatureNotSupported,
+    /// An error occurred in the underlying platform (graphics API, OS, or a system library).
     #[error(
         "An error occurred within the underlying platform (graphics API, OS, or a system library such as NvAPI). Consult the NGX logs and the graphics API's validation layers."
     )]
     PlatformError,
+    /// Feature creation failed because an identical feature already exists.
     #[error(
         "The NGX feature could not be created because a feature with identical parameters already exists, and the feature does not support multiple identical instances."
     )]
     FeatureAlreadyExists,
+    /// No feature was found for the provided handle.
     #[error("A feature associated with the provided handle could not be found.")]
     FeatureNotFound,
+    /// A provided parameter had an incorrect value/type, or a required parameter was missing.
     #[error(
         "One or more provided parameters had an incorrect value or type, or a required parameter was not provided."
     )]
     InvalidParameters,
+    /// The feature's scratch buffer was missing or too small.
     #[error(
         "The feature requires a scratch buffer, but none was provided or the provided buffer is too small."
     )]
     ScratchBufferTooSmall,
+    /// An NGX call was made before the SDK was initialized.
     #[error(
         "A function that requires the NGX SDK to be initialized was called before the SDK was properly initialized."
     )]
     NotInitialized,
+    /// An input buffer had an unsupported format.
     #[error("One or more input buffers supplied to the feature had an unsupported format.")]
     UnsupportedInputFormat,
+    /// An output buffer lacked read/write (UAV) access.
     #[error(
         "The feature requires read/write access to output buffers, but one or more provided buffers did not have the correct access flags (UAV in D3D11/D3D12)."
     )]
     RWFlagMissing,
+    /// A required input was not provided (e.g. a null `ID3D12Resource`).
     #[error("A required input parameter was not provided.")]
     MissingInput,
+    /// The requested feature's library could not be found / initialized.
     #[error(
         "The requested feature could not be initialized, likely because the library for that feature could not be found."
     )]
     UnableToInitializeFeature,
+    /// A newer NVIDIA driver or feature library is required.
     #[error(
         "A function was used which requires a newer version of the NVIDIA Display Driver or feature library than is currently installed."
     )]
     OutOfDate,
+    /// The system lacked sufficient GPU memory.
     #[error("An operation could not be completed because the system lacked sufficient GPU memory.")]
     OutOfGPUMemory,
+    /// A provided buffer had an unsupported format.
     #[error("One or more buffers provided to the feature had an unsupported format.")]
     UnsupportedFormat,
+    /// The SDK lacked write permission for `InApplicationDataPath`.
     #[error(
         "The SDK does not have the necessary write permissions for the path specified in InApplicationDataPath."
     )]
     UnableToWriteToAppDataPath,
+    /// A parameter is unsupported by the current version or has an unsupported value.
     #[error(
         "A parameter supplied to the feature is either unsupported by the current version or has an unsupported value."
     )]
     UnsupportedParameter,
+    /// NVIDIA has restricted use of this feature in the current application.
     #[error(
         "NVIDIA has restricted the use of this feature in the current application. Contact NVIDIA for further information."
     )]
     Denied,
+    /// The requested functionality is not implemented in the current SDK / driver / feature library.
     #[error(
         "The requested feature or functionality has not been implemented in the current version of the NGX SDK, display driver, or feature library."
     )]
@@ -265,5 +288,18 @@ mod tests {
             auto.as_perf_quality_value(UVec2::new(3840, 2160)),
             NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_UltraPerformance
         );
+    }
+
+    #[test]
+    fn as_flags_strips_the_synthetic_output_subrect_bit() {
+        // OutputSubrect (bit 256) is crate-invented and is NOT part of the NGX flag set, so it must
+        // never reach NGX's InFeatureCreateFlags; if as_flags stopped stripping it, NGX would get an
+        // undefined flag and likely reject feature creation.
+        let with_subrect = DlssFeatureFlags::AutoExposure | DlssFeatureFlags::OutputSubrect;
+        assert_eq!(with_subrect.as_flags(), DlssFeatureFlags::AutoExposure.as_flags());
+        // ...but it is still observable on the original flags (it drives InEnableOutputSubrects).
+        assert!(with_subrect.contains(DlssFeatureFlags::OutputSubrect));
+        // And bit 256 never leaks through as_flags for any combination.
+        assert_eq!(with_subrect.as_flags() & 256, 0);
     }
 }

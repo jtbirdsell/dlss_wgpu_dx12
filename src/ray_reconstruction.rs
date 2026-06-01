@@ -68,6 +68,27 @@ pub struct DlssRayReconstructionParameters<'a> {
 }
 
 impl<'a> DlssRayReconstructionParameters<'a> {
+    /// Reject null required resources (a non-Dx12 or destroyed texture resolves to null via
+    /// `DlssTexture::raw`) before handing pointers to NGX evaluate — mirrors
+    /// [`crate::DlssRenderParameters`]'s validation, which the SR path runs and RR previously lacked.
+    /// `roughness` is intentionally not required here: with [`RoughnessMode::Packed`] it rides in
+    /// `normals.w` and NGX ignores the separate texture.
+    fn validate(&self) -> Result<(), DlssError> {
+        let required = [
+            self.color.raw(),
+            self.diffuse_albedo.raw(),
+            self.specular_albedo.raw(),
+            self.normals.raw(),
+            self.depth.raw(),
+            self.motion_vectors.raw(),
+            self.output.raw(),
+        ];
+        if required.iter().any(|p| p.is_null()) {
+            return Err(DlssError::MissingInput);
+        }
+        Ok(())
+    }
+
     fn barrier_list(&self) -> impl Iterator<Item = TextureTransition<&'a wgpu::Texture>> {
         fn input<'a>(t: &DlssTexture<'a>) -> TextureTransition<&'a wgpu::Texture> {
             TextureTransition {
@@ -240,6 +261,7 @@ impl DlssRayReconstructionContext {
         params: DlssRayReconstructionParameters,
         queue: &wgpu::Queue,
     ) -> Result<(), DlssError> {
+        params.validate()?;
         let sdk = self.sdk.lock().unwrap();
         let partial = params
             .partial_texture_size

@@ -100,8 +100,11 @@ This crate currently targets **wgpu 29.0.x**. Your patched checkout must be that
 the `windows` COM interface types stay ABI-compatible (this crate pins `windows` to the same major
 version wgpu-hal uses).
 
-Once the accessor is merged and released upstream, this step goes away and a plain
-`wgpu = "29"` dependency will suffice.
+Once the accessor lands upstream (tracked as [gfx-rs/wgpu#9613](https://github.com/gfx-rs/wgpu/pull/9613)),
+**Super Resolution and Ray Reconstruction** can move to a plain `wgpu = "29"` dependency. **Frame
+Generation** still needs the fork's Streamline factory-upgrade (gfx-rs/wgpu#9614, NVIDIA-specific and
+not upstreamable as-is), so an FG consumer keeps the fork via `[patch.crates-io]`. See
+[`docs/upstreaming.md`](upstreaming.md) for the current status.
 
 ## 4. Ship the release DLLs at runtime
 
