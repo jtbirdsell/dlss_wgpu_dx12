@@ -97,6 +97,7 @@ impl<'a> DlssRayReconstructionParameters<'a> {
 /// A per-camera DLSS Ray Reconstruction feature. Cache and recreate only when settings change.
 pub struct DlssRayReconstructionContext {
     upscaled_resolution: UVec2,
+    optimal_render_resolution: UVec2,
     min_render_resolution: UVec2,
     max_render_resolution: UVec2,
     device: wgpu::Device,
@@ -220,6 +221,7 @@ impl DlssRayReconstructionContext {
 
         Ok(Self {
             upscaled_resolution,
+            optimal_render_resolution: optimal,
             min_render_resolution: min,
             max_render_resolution: max,
             device: device.clone(),
@@ -320,9 +322,12 @@ impl DlssRayReconstructionContext {
         self.upscaled_resolution
     }
 
-    /// The recommended render resolution, pre-upscaling.
+    /// The recommended (optimal) render resolution for the chosen quality mode, pre-upscaling. This is
+    /// the resolution NGX was created with (`InWidth`/`InHeight`), so the caller must render here to
+    /// avoid a per-frame network recreate / suboptimal reconstruction. Use
+    /// [`Self::render_resolution_range`] for dynamic scaling between min and max.
     pub fn render_resolution(&self) -> UVec2 {
-        self.min_render_resolution
+        self.optimal_render_resolution
     }
 
     /// Render-resolution range for dynamic resolution scaling.
