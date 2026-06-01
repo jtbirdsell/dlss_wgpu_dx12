@@ -83,3 +83,10 @@ required-features = ["ray-reconstruction"]
 [[example]]
 name = "frame_generation"
 required-features = ["frame-generation"]
+
+# The combined Super Resolution (raw NGX) + Frame Generation (Streamline) example. It needs BOTH
+# features: SR is always compiled but `super-resolution` gates its intended use, and the Streamline
+# FG API is gated behind `frame-generation`.
+[[example]]
+name = "sr_plus_fg"
+required-features = ["super-resolution", "frame-generation"]

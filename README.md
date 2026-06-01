@@ -217,6 +217,28 @@ See **[examples/frame_generation.rs](examples/frame_generation.rs)** for a compl
 example: an animated window that drives the full per-frame sequence and prints the observed
 `numFramesActuallyPresented`.
 
+### Combining with Super Resolution
+
+Super Resolution (raw NGX) and Frame Generation (Streamline) compose: render low-res, upscale with
+[`DlssContext`], then let DLSS-G interpolate the upscaled frames. Two things make this clean:
+
+- **One source of per-frame constants.** Build the FG constants from the *same*
+  [`DlssRenderParameters`] you hand to the SR evaluate via
+  `FgConstants::from_render_parameters(&sr_params, render_resolution)` (and
+  `from_ray_reconstruction_parameters` for RR). This keeps jitter, history reset, and motion-vector
+  scale identical across SR and FG, and it converts the motion-vector convention for you (NGX reads
+  render-resolution *pixels*; FG *normalizes* to `[-1, 1]`, so `fg.mvec_scale =
+  sr.motion_vector_scale / render_resolution`).
+- **Resolutions.** Depth and motion vectors stay at **render resolution** (shared with SR);
+  hud-less color and the UI buffer are at **output resolution** (they must match the back buffer).
+  After the SR upscale, blit the UAV output into the hud-less color and copy it to the back buffer,
+  then tag the hud-less color for FG.
+
+This combination was hardware-validated on an RTX 4090 (960×540 → 1920×1080 upscale **and**
+`numFramesActuallyPresented == 2`). See **[examples/sr_plus_fg.rs](examples/sr_plus_fg.rs)** for the
+full combined pipeline. (DLSS-G runs at output resolution regardless; the same depth/motion-vector
+buffers feed both features.)
+
 ## Cargo features
 
 | Feature | Default | Description |

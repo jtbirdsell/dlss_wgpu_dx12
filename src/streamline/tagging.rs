@@ -192,6 +192,69 @@ impl FgConstants {
         self
     }
 
+    /// Derives the FG per-frame constants from the **same** [`crate::DlssRenderParameters`] used for
+    /// the NGX Super Resolution evaluate, so SR and FG share one source of truth for jitter,
+    /// motion-vector scale, and history reset (a common source of SR↔FG drift bugs when combining
+    /// the two). `render_resolution` is the resolution the motion-vector buffer is in.
+    ///
+    /// **It converts the motion-vector convention**, which differs between the two features: NGX SR
+    /// consumes motion vectors in **render-resolution pixels** (multiplied by
+    /// `DlssRenderParameters::motion_vector_scale`, default `(1, 1)`), whereas Streamline FG's
+    /// `mvec_scale` **normalizes** them to `[-1, 1]`. Feeding the *same* buffer to both therefore
+    /// requires `fg.mvec_scale = sr.motion_vector_scale / render_resolution` — which this computes.
+    ///
+    /// Camera matrices, [`Self::depth_inverted`], and [`Self::camera_motion_included`] are **not**
+    /// derivable from `DlssRenderParameters`; they keep [`Self::new`]'s defaults (identity camera,
+    /// standard depth, full motion in the mvec buffer). Set them on the returned value if your scene
+    /// needs otherwise (e.g. `depth_inverted` for reversed-Z). `reset` is also auto-forced on frame 0
+    /// by [`super::frame_gen::Frame::set_constants`].
+    pub fn from_render_parameters(
+        params: &crate::DlssRenderParameters,
+        render_resolution: UVec2,
+    ) -> Self {
+        Self::derive(
+            params.motion_vector_scale,
+            params.jitter_offset,
+            params.reset,
+            render_resolution,
+        )
+    }
+
+    /// Ray Reconstruction counterpart of [`Self::from_render_parameters`]: derives the FG constants
+    /// from the same [`crate::DlssRayReconstructionParameters`] used for the NGX RR evaluate, with
+    /// the identical motion-vector-scale conversion.
+    #[cfg(feature = "ray-reconstruction")]
+    pub fn from_ray_reconstruction_parameters(
+        params: &crate::DlssRayReconstructionParameters,
+        render_resolution: UVec2,
+    ) -> Self {
+        Self::derive(
+            params.motion_vector_scale,
+            params.jitter_offset,
+            params.reset,
+            render_resolution,
+        )
+    }
+
+    /// Shared core of the SR/RR → FG constant bridges: converts the NGX render-resolution-pixel
+    /// motion-vector scale into Streamline's normalized `mvec_scale` and carries jitter + reset.
+    fn derive(
+        motion_vector_scale: Option<Vec2>,
+        jitter_offset: Vec2,
+        reset: bool,
+        render_resolution: UVec2,
+    ) -> Self {
+        let sr_mv_scale = motion_vector_scale.unwrap_or(Vec2::ONE);
+        let mut c = Self::new();
+        c.mvec_scale = Vec2::new(
+            sr_mv_scale.x / render_resolution.x.max(1) as f32,
+            sr_mv_scale.y / render_resolution.y.max(1) as f32,
+        );
+        c.jitter_offset = jitter_offset;
+        c.reset = reset;
+        c
+    }
+
     /// Builds the `#[repr(C)]` [`Constants`] handed to `slSetConstants`, copying every field into
     /// the spike-proven layout. Camera basis vectors and the remaining `sl::Constants` fields keep
     /// the validated defaults from [`Constants::new`].
