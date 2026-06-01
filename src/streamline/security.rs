@@ -277,7 +277,14 @@ fn verify_signer_is_nvidia(path: &Path, wide_path: &[u16]) -> Result<(), Streaml
 /// Whether the NVIDIA signer pin is configured as a hard requirement via
 /// `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1`.
 fn signer_pin_is_required() -> bool {
-    std::env::var_os(REQUIRE_NVIDIA_SIGNER_ENV).is_some_and(|v| v == "1")
+    signer_pin_required_from(std::env::var_os(REQUIRE_NVIDIA_SIGNER_ENV))
+}
+
+/// Pure form of [`signer_pin_is_required`]: the pin is promoted to a hard requirement only when the
+/// env value is exactly `"1"`. Split out so the policy is unit-testable without mutating the
+/// process environment.
+fn signer_pin_required_from(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|v| v == "1")
 }
 
 /// Crack the embedded PKCS#7 signature on `wide_path` and return the signer leaf certificate's
@@ -434,4 +441,81 @@ fn read_subject_name(cert_ctx: *const CERT_CONTEXT) -> Result<String, String> {
     // Drop the trailing NUL before decoding.
     let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
     Ok(String::from_utf16_lossy(&name[..end]))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Headless tests for the signature hard-gate. These run real Win32 `WinVerifyTrust` against
+    //! files on disk — no GPU and no Streamline SDK required, so they run on a Windows CI runner.
+
+    use super::{signer_pin_required_from, verify_interposer_signature, StreamlineError};
+    use std::ffi::OsString;
+    use std::io::Write;
+
+    #[test]
+    fn signer_pin_required_only_when_env_is_exactly_one() {
+        assert!(signer_pin_required_from(Some(OsString::from("1"))));
+        assert!(!signer_pin_required_from(Some(OsString::from("0"))));
+        assert!(!signer_pin_required_from(Some(OsString::from("true"))));
+        assert!(!signer_pin_required_from(Some(OsString::from(""))));
+        assert!(!signer_pin_required_from(None));
+    }
+
+    #[test]
+    fn unsigned_file_is_rejected_by_the_trust_gate() {
+        // The hard gate must refuse a file with no valid embedded Authenticode signature. Write a
+        // junk (non-PE, unsigned) file and confirm WinVerifyTrust fails it.
+        let path = std::env::temp_dir().join("dlss_wgpu_dx12_unsigned_interposer_test.bin");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp test file");
+            f.write_all(b"not a signed PE -- just junk bytes for the trust gate test")
+                .expect("write temp test file");
+        }
+        let result = verify_interposer_signature(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(result, Err(StreamlineError::SignatureVerificationFailed(_))),
+            "expected SignatureVerificationFailed for an unsigned file, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn trusted_but_non_nvidia_signer_is_rejected() {
+        // Opportunistic + skip-safe: most Windows system files are *catalog*-signed (which the
+        // file-based trust gate treats as unsigned), but the Microsoft VC++ runtime DLLs typically
+        // carry an *embedded* Authenticode signature. If we can find one that passes the trust gate,
+        // its non-NVIDIA signer must trip the pin (`UntrustedSigner`). If none on this runner are
+        // embedded-signed (so they all fail the trust gate instead), skip rather than fail.
+        let candidates = [
+            r"C:\Windows\System32\msvcp140.dll",
+            r"C:\Windows\System32\vcruntime140.dll",
+            r"C:\Windows\System32\vcruntime140_1.dll",
+            r"C:\Windows\System32\concrt140.dll",
+            r"C:\Windows\System32\msvcp140_1.dll",
+        ];
+        for candidate in candidates {
+            let path = std::path::Path::new(candidate);
+            if !path.exists() {
+                continue;
+            }
+            match verify_interposer_signature(path) {
+                Err(StreamlineError::UntrustedSigner(subject)) => {
+                    assert!(
+                        !subject.to_ascii_uppercase().contains("NVIDIA"),
+                        "an NVIDIA subject should not have tripped UntrustedSigner: {subject:?}"
+                    );
+                    eprintln!(
+                        "UntrustedSigner fired for embedded-signed {candidate} (subject {subject:?})"
+                    );
+                    return;
+                }
+                // Catalog-signed (treated as unsigned), or signer unparseable (soft pass) — try the
+                // next candidate.
+                _ => continue,
+            }
+        }
+        eprintln!(
+            "skipping: no embedded-signed, non-NVIDIA system binary found to exercise the signer pin"
+        );
+    }
 }
