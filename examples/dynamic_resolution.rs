@@ -1,32 +1,37 @@
-//! Headless DLSS Super Resolution example.
+//! Headless DLSS Super Resolution example demonstrating DYNAMIC RESOLUTION SCALING (DRS).
 //!
-//! Exercises the full DLSS Super Resolution path on real hardware without a window or surface:
-//! it builds a DX12 [`wgpu::Instance`], picks an NVIDIA adapter, creates a [`wgpu::Device`] +
-//! [`wgpu::Queue`], initializes a [`DlssSdk`] and a [`DlssContext`], allocates render- and
-//! upscaled-resolution textures, then drives a short evaluation loop and submits the work to the
-//! GPU.
+//! Dynamic resolution scaling lets a renderer trade image quality for frame time on the fly: when
+//! the GPU is under pressure it renders the scene at a *smaller* subrect of its input textures, and
+//! DLSS still upscales that subrect to the same fixed output resolution. The key DLSS contract is
+//! that the input textures are allocated **once at the maximum render resolution**
+//! (`*render_resolution_range().end()`), and each frame the renderer tells DLSS which **subrect** of
+//! those max-sized textures it actually rendered into via
+//! [`DlssRenderParameters::partial_texture_size`]. DLSS must evaluate cleanly as that subrect
+//! changes frame to frame — no reallocation, no context recreation, no `InvalidParameters`.
 //!
-//! The textures are never populated with a real render — DLSS will happily upscale uninitialized
-//! (cleared) inputs, which is all that is needed to confirm the integration links, binds the raw
-//! `ID3D12Resource` handles, and evaluates end to end on this machine.
+//! This example mirrors `super_resolution.rs` (headless, NVIDIA-vendor check, cleared inputs, the
+//! graceful `FeatureNotSupported` exit) but, instead of pinning the render resolution to the minimum
+//! and keeping it fixed, it:
+//!   1. Creates the [`DlssContext`] in [`DlssPerfQualityMode::Balanced`] for a 4K output.
+//!   2. Reads the render-resolution range (`min..=max`) and allocates all SR input textures ONCE at
+//!      the MAX render resolution.
+//!   3. Loops ~16 frames, sweeping the per-frame `render_res` across `[min, max]` with a triangle
+//!      wave over the frame index, recomputing `suggested_jitter(frame, render_res)` each frame and
+//!      passing `partial_texture_size: Some(render_res)` so DLSS only consumes that subrect.
 //!
-//! By default it runs in [`DlssPerfQualityMode::Quality`] (upscaling from a lower render
-//! resolution). Pass `--dlaa` (or set `DLSS_MODE=dlaa`) to switch to [`DlssPerfQualityMode::Dlaa`]
-//! instead: DLAA is anti-aliasing only, so DLSS forces the render resolution to equal the output
-//! resolution (no upscaling). The same allocation + evaluation loop works unchanged — only the mode
-//! differs — so this flag is a one-line way to exercise the native-resolution AA path.
+//! The point is to prove DRS evaluates cleanly across the whole sweep. On a real RTX GPU the lead
+//! should confirm none of the swept frames returns `InvalidParameters`.
 //!
 //! Run with the SDK + libclang environment variables set (see the crate README), e.g.:
 //!
 //! ```powershell
 //! $env:DLSS_SDK='C:/Users/jorda/dlss_sdk'
 //! $env:LIBCLANG_PATH='C:/Users/jorda/AppData/Roaming/Python/Python314/site-packages/clang/native'
-//! cargo run --example super_resolution            # Quality (upscaling)
-//! cargo run --example super_resolution -- --dlaa  # DLAA (native-res AA, no upscaling)
+//! cargo run --example dynamic_resolution
 //! ```
 //!
-//! If DLSS is not supported on this system (non-RTX GPU, missing driver, or a non-Dx12 device),
-//! the example prints a message and exits cleanly rather than panicking.
+//! If DLSS is not supported on this system (non-RTX GPU, missing driver, or a non-Dx12 device), the
+//! example prints a message and exits cleanly rather than panicking.
 
 use dlss_wgpu_dx12::{
     DlssContext, DlssError, DlssExposure, DlssFeatureFlags, DlssPerfQualityMode,
@@ -47,9 +52,9 @@ const PROJECT_ID: Uuid = Uuid::from_u128(0x9b8d_2f41_6c7a_4e15_8d3b_a0f2_71e4_55
 /// Upscaled (output) resolution to drive DLSS at — a typical 4K target.
 const UPSCALED_RESOLUTION: UVec2 = UVec2::new(3840, 2160);
 
-/// How many frames to evaluate. DLSS is temporal, so a handful of frames is enough to confirm the
-/// feature accumulates history without complaining.
-const FRAME_COUNT: u32 = 8;
+/// How many frames to evaluate while sweeping the render resolution. A handful of frames over the
+/// full sweep is enough to confirm DLSS accepts a varying subrect without complaining.
+const FRAME_COUNT: u32 = 16;
 
 fn main() {
     match run() {
@@ -61,17 +66,14 @@ fn main() {
             );
         }
         Err(error) => {
-            eprintln!("DLSS Super Resolution example failed: {error}");
+            eprintln!("DLSS dynamic resolution example failed: {error}");
             std::process::exit(1);
         }
     }
 }
 
 fn run() -> Result<(), DlssError> {
-    // 1. Build a DX12 instance with wgpu's default shader compiler, so the example runs without
-    //    shipping dxcompiler.dll. A real app that authors Shader Model 6+ HLSL would instead build
-    //    its instance with `dlss_wgpu_dx12::dxc_instance_descriptor()` and ship dxcompiler.dll.
-    //    DLSS itself needs neither.
+    // 1. Build a DX12 instance with wgpu's default shader compiler (DLSS needs no dxcompiler.dll).
     let mut instance_descriptor = InstanceDescriptor::new_without_display_handle();
     instance_descriptor.backends = Backends::DX12;
     let instance = Instance::new(instance_descriptor);
@@ -98,7 +100,7 @@ fn run() -> Result<(), DlssError> {
     // 3. Create the device + queue. TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES lets the DLSS output
     //    texture expose read-write storage usage, matching what a real renderer would request.
     let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
-        label: Some("dlss_super_resolution"),
+        label: Some("dlss_dynamic_resolution"),
         required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
         ..Default::default()
     }))
@@ -107,73 +109,57 @@ fn run() -> Result<(), DlssError> {
     // 4. Initialize the application-wide DLSS / NGX SDK once.
     let sdk = DlssSdk::new(PROJECT_ID, device.clone())?;
 
-    // 5. Choose the perf/quality mode. `--dlaa` (or `DLSS_MODE=dlaa`) selects DLAA (anti-aliasing
-    //    only — DLSS forces render res == output res, so no upscaling happens); otherwise the
-    //    default is Quality (upscaling from a lower render resolution).
-    let perf_quality_mode = if dlaa_requested() {
-        DlssPerfQualityMode::Dlaa
-    } else {
-        DlssPerfQualityMode::Quality
-    };
-    println!("DLSS perf/quality mode: {perf_quality_mode:?}");
-
-    // 6. Create a per-camera DLSS context at the chosen output resolution + quality mode.
+    // 5. Create a per-camera DLSS context at the chosen output resolution. Balanced gives a render
+    //    resolution range with real headroom between min and max (DLAA would collapse it to a single
+    //    point), which is exactly what dynamic resolution scaling sweeps across.
     let mut context = DlssContext::new(
         UPSCALED_RESOLUTION,
-        perf_quality_mode,
-        // AutoExposure pairs with DlssExposure::Automatic below; motion vectors are at render
-        // resolution (the default), so no LowResolutionMotionVectors flag is set.
+        DlssPerfQualityMode::Balanced,
         DlssFeatureFlags::AutoExposure,
         sdk,
         &device,
         &queue,
     )?;
 
-    // Render at the recommended (lowest-cost) render resolution and let DLSS upscale to the output.
-    // Inputs are allocated at exactly this size and the eval subrect is pinned to match it via
-    // `partial_texture_size` below. (A dynamic-resolution renderer would instead allocate at the max
-    // of `render_resolution_range()` and vary the subrect per frame.)
-    let render_resolution = context.render_resolution();
+    // 6. Query the render-resolution range DRS sweeps across. `min` is the cheapest (most upscaled)
+    //    render resolution; `max` is the most expensive (least upscaled). The inputs are allocated at
+    //    `max` and DLSS evaluates a varying subrect within `[min, max]`.
+    let range = context.render_resolution_range();
+    let min_render = *range.start();
+    let max_render = *range.end();
     let upscaled_resolution = context.upscaled_resolution();
     println!(
-        "DLSS render resolution: {}x{}",
-        render_resolution.x, render_resolution.y
+        "DLSS render-resolution range (DRS sweep): {}x{} (min) .. {}x{} (max)",
+        min_render.x, min_render.y, max_render.x, max_render.y
     );
     println!(
         "DLSS upscaled resolution: {}x{}",
         upscaled_resolution.x, upscaled_resolution.y
     );
-    // In DLAA the render resolution equals the output resolution (no upscaling); in upscaling modes
-    // it is strictly smaller. Make the active behavior explicit.
-    if perf_quality_mode == DlssPerfQualityMode::Dlaa {
-        println!("DLAA active: render res == output res (anti-aliasing only, no upscaling).");
-    }
 
-    // 7. Allocate the DLSS input textures at render resolution and the output at upscaled
-    //    resolution. Inputs are sampled (TEXTURE_BINDING) and cleared each frame via render passes
-    //    (RENDER_ATTACHMENT); the output is a UAV (STORAGE_BINDING).
+    // 7. Allocate the DLSS input textures ONCE at the MAX render resolution. Every frame's subrect is
+    //    a `[0,0]`-anchored window into these max-sized textures (DLSS evaluates the subrect, not the
+    //    full allocation). The output is allocated at the upscaled resolution.
     let input_usage = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
 
     let color = color_target(
         &device,
         "dlss_color",
-        render_resolution,
+        max_render,
         TextureFormat::Rgba16Float,
         input_usage,
     );
-    // DLSS depth bound as a sampled R32Float resource (no depth-stencil semantics needed at the
-    // NGX boundary on D3D12).
     let depth = color_target(
         &device,
         "dlss_depth",
-        render_resolution,
+        max_render,
         TextureFormat::R32Float,
         input_usage,
     );
     let motion_vectors = color_target(
         &device,
         "dlss_motion_vectors",
-        render_resolution,
+        max_render,
         TextureFormat::Rg16Float,
         input_usage,
     );
@@ -185,15 +171,28 @@ fn run() -> Result<(), DlssError> {
         TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
     );
 
-    // 8. Drive the evaluation loop.
+    // 8. Drive the evaluation loop, sweeping the render resolution every frame.
     for frame_number in 0..FRAME_COUNT {
-        let jitter_offset = context.suggested_jitter(frame_number, render_resolution);
+        // Triangle wave over the frame index in [0, 1]: ramp up to the midpoint, then back down, so
+        // the sweep visits the full `[min, max]` range (and its endpoints) over the run.
+        let phase = frame_number as f32 / (FRAME_COUNT - 1).max(1) as f32;
+        let triangle = 1.0 - (2.0 * phase - 1.0).abs(); // 0 -> 1 -> 0
+        let render_res = lerp_resolution(min_render, max_render, triangle);
 
-        // Produce (here: clear) the DLSS inputs and submit that work BEFORE evaluating DLSS, so the
-        // resource transitions inside render() observe the post-render states. A real renderer would
-        // draw the scene here instead of clearing.
+        println!(
+            "frame {frame_number}: render subrect {}x{} (t={triangle:.3}) -> {}x{}",
+            render_res.x, render_res.y, upscaled_resolution.x, upscaled_resolution.y
+        );
+
+        // Jitter must be recomputed for THIS frame's render resolution (the phase count depends on
+        // the upscale ratio, which changes as the subrect changes).
+        let jitter_offset = context.suggested_jitter(frame_number, render_res);
+
+        // Produce (here: clear) the DLSS inputs and submit BEFORE evaluating DLSS, so the resource
+        // transitions inside render() observe the post-render states. We clear the full max-sized
+        // textures; DLSS only reads the `render_res` subrect.
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dlss_super_resolution_inputs"),
+            label: Some("dlss_dynamic_resolution_inputs"),
         });
         clear_color(&mut encoder, &color, Color::BLACK);
         clear_color(&mut encoder, &depth, Color::WHITE);
@@ -215,7 +214,9 @@ fn run() -> Result<(), DlssError> {
                 // Reset temporal history on the first frame (treat it as a camera cut).
                 reset: frame_number == 0,
                 jitter_offset,
-                partial_texture_size: Some(render_resolution),
+                // The load-bearing DRS parameter: evaluate only THIS frame's render subrect of the
+                // max-sized inputs. DLSS must accept this changing every frame without complaint.
+                partial_texture_size: Some(render_res),
                 motion_vector_scale: None,
             },
             &queue,
@@ -227,22 +228,30 @@ fn run() -> Result<(), DlssError> {
     }
 
     println!(
-        "Success: evaluated {FRAME_COUNT} DLSS Super Resolution frames \
-         ({}x{} -> {}x{}).",
-        render_resolution.x, render_resolution.y, upscaled_resolution.x, upscaled_resolution.y
+        "Success: evaluated {FRAME_COUNT} DLSS frames sweeping the render subrect across \
+         {}x{}..{}x{} (inputs allocated once at {}x{}; output {}x{}).",
+        min_render.x,
+        min_render.y,
+        max_render.x,
+        max_render.y,
+        max_render.x,
+        max_render.y,
+        upscaled_resolution.x,
+        upscaled_resolution.y
     );
 
     Ok(())
 }
 
-/// Whether DLAA was requested via the `--dlaa` CLI flag or the `DLSS_MODE=dlaa` environment
-/// variable (case-insensitive). Either selects [`DlssPerfQualityMode::Dlaa`].
-fn dlaa_requested() -> bool {
-    let from_args = std::env::args().any(|arg| arg == "--dlaa");
-    let from_env = std::env::var("DLSS_MODE")
-        .map(|mode| mode.eq_ignore_ascii_case("dlaa"))
-        .unwrap_or(false);
-    from_args || from_env
+/// Linearly interpolates a render resolution between `min` and `max` by `t` in `[0, 1]`, clamping
+/// the result into `[min, max]` so floating-point round-off never produces a subrect outside the
+/// range DLSS reported (which would risk `InvalidParameters`).
+fn lerp_resolution(min: UVec2, max: UVec2, t: f32) -> UVec2 {
+    let lerp = |lo: u32, hi: u32| -> u32 {
+        let value = lo as f32 + (hi as f32 - lo as f32) * t;
+        (value.round() as u32).clamp(lo, hi)
+    };
+    UVec2::new(lerp(min.x, max.x), lerp(min.y, max.y))
 }
 
 /// Creates a 2D color-renderable texture of the given format and usage.

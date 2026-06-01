@@ -12,6 +12,21 @@
 //! Streamline FFI and confirmed `numFramesActuallyPresented == 2` on an RTX 4090). It compiles in
 //! CI but can only be *verified* on an RTX GPU + display.
 //!
+//! ## `--ui`: DLSS-G UI recomposition (optional)
+//!
+//! By default the UI input is cleared fully transparent (no HUD) and UI recomposition is OFF. Pass
+//! `--ui` (or set `FG_UI=1`) to exercise DLSS-G's **UI recomposition** path:
+//!   * The FG options are built with
+//!     `FrameGenerationOptions::enabled().with_color_format(format).with_ui_recomposition(Rgba8Unorm)`,
+//!     so `slDLSSGSetOptions` enables `enableUserInterfaceRecomposition`.
+//!   * Instead of clearing the UI texture transparent, a tiny fullscreen-triangle pass draws an
+//!     OPAQUE HUD rectangle into the top-left corner (alpha=1 inside the rect, alpha=0 elsewhere).
+//!
+//! DLSS-G then recomposites that crisp UI layer over each generated frame rather than interpolating
+//! it. The existing `FgUi::ColorAndAlpha(...)` tag is unchanged — only the options + the UI contents
+//! differ. On the 4090 the lead should confirm the HUD rectangle stays crisp on generated frames
+//! (not smeared / interpolated) while `numFramesActuallyPresented` still reaches 2.
+//!
 //! ## RUN REQUIREMENTS (read before running)
 //!
 //! 1. **`STREAMLINE_SDK` env var** must point at the Streamline SDK root so the crate can locate and
@@ -134,6 +149,41 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Inline WGSL for the `--ui` HUD: a fullscreen triangle whose fragment shader writes an OPAQUE
+/// rectangle (alpha = 1) into the top-left corner (`uv.x < 0.25 && uv.y < 0.12`) and a fully
+/// transparent pixel (alpha = 0) everywhere else. Targets the UI texture's `Rgba8Unorm` format so
+/// DLSS-G can recomposite the crisp HUD over each generated frame.
+const UI_HUD_WGSL: &str = r#"
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    let xy = p[vid];
+    var out: VsOut;
+    out.pos = vec4<f32>(xy, 0.0, 1.0);
+    // uv in [0,1] with V flipped so uv.y=0 is the top scanline (top-left HUD corner).
+    out.uv = vec2<f32>((xy.x + 1.0) * 0.5, 1.0 - (xy.y + 1.0) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Opaque green HUD rectangle in the top-left corner; transparent everywhere else.
+    if (in.uv.x < 0.25 && in.uv.y < 0.12) {
+        return vec4<f32>(0.0, 0.8, 0.2, 1.0);
+    }
+    return vec4<f32>(0.0);
+}
+"#;
+
 /// Everything that exists after the wgpu device is up and the DLSS-G context is bound.
 struct GpuState {
     window: Arc<Window>,
@@ -158,6 +208,11 @@ struct GpuState {
     /// Pipeline whose color target is the hudless texture's format (same format in practice, kept
     /// separate so differing formats still work).
     bar_pipeline_hudless: wgpu::RenderPipeline,
+
+    /// `Some` when `--ui` is active: a fullscreen-triangle pipeline (targeting the UI texture's
+    /// `Rgba8Unorm` format) that draws the opaque HUD rectangle. `None` keeps the original
+    /// transparent-clear behavior.
+    ui_hud_pipeline: Option<wgpu::RenderPipeline>,
 
     /// The crate's per-camera DLSS-G feature. Owns the Streamline core API; `slShutdown` runs on its
     /// `Drop`.
@@ -257,11 +312,21 @@ impl GpuState {
         //
         // `FrameGenerationOptions::enabled()` sets mode=On / numFramesToGenerate=1 (classic 2x).
         // `.with_color_format(format)` tells SL the DXGI format of the back buffer + HUD-less color.
+        // With `--ui`, also `.with_ui_recomposition(Rgba8Unorm)` so DLSS-G recomposites a separately
+        // tagged UI layer over the generated frame (keeping the HUD crisp) instead of interpolating
+        // it; the UI texture is Rgba8Unorm, matching the tagged `ui_tex` below.
         // -----------------------------------------------------------------------------------------
-        let options = FrameGenerationOptions::enabled().with_color_format(format);
+        let ui_recomposition = ui_requested();
+        let base_options = FrameGenerationOptions::enabled().with_color_format(format);
+        let options = if ui_recomposition {
+            base_options.with_ui_recomposition(wgpu::TextureFormat::Rgba8Unorm)
+        } else {
+            base_options
+        };
         let fg = FrameGenerationContext::new(streamline, &device, &adapter, &options)?;
         println!(
-            "DLSS-G enabled (mode On, numFramesToGenerate=1, color_format set from {format:?})"
+            "DLSS-G enabled (mode On, numFramesToGenerate=1, color_format set from {format:?}, \
+             ui_recomposition={ui_recomposition})"
         );
 
         // NOW create the swapchain (SL's device registration is in place).
@@ -365,6 +430,47 @@ impl GpuState {
         let bar_pipeline_hudless =
             make_bar_pipeline(hudless_tex.format(), "fg bar pipeline (hudless)");
 
+        // -----------------------------------------------------------------------------------------
+        // UI HUD pipeline, built only when `--ui` is active. It has no bindings — the fragment
+        // shader hard-codes the rectangle from the interpolated uv — so it uses the default (empty)
+        // pipeline layout and targets the UI texture's Rgba8Unorm format.
+        // -----------------------------------------------------------------------------------------
+        let ui_hud_pipeline = if ui_recomposition {
+            let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("fg ui hud shader"),
+                source: wgpu::ShaderSource::Wgsl(UI_HUD_WGSL.into()),
+            });
+            Some(
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("fg ui hud pipeline"),
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &ui_shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &ui_shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: ui_tex.format(),
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+            )
+        } else {
+            None
+        };
+
         Ok(Self {
             window,
             _instance: instance,
@@ -380,6 +486,7 @@ impl GpuState {
             bar_bind_group,
             bar_pipeline_surface,
             bar_pipeline_hudless,
+            ui_hud_pipeline,
             fg,
             render_resolution: UVec2::new(WIDTH, HEIGHT),
             frame_index: 0,
@@ -507,18 +614,51 @@ impl GpuState {
             &self.bar_bind_group,
             "draw bar -> hudless",
         );
-        // Clear the UI color+alpha to fully transparent (no UI in this demo).
-        clear_target(
-            &mut render_encoder,
-            &ui_view,
-            wgpu::Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            },
-            "clear ui",
-        );
+        // UI color+alpha. With `--ui` (ui_hud_pipeline is Some) draw an OPAQUE HUD rectangle into
+        // the top-left corner (alpha=1 inside, alpha=0 elsewhere) for DLSS-G to recomposite over the
+        // generated frame; otherwise clear it fully transparent (no UI in this demo). The fragment
+        // shader hard-clears the background to transparent via its alpha=0 return, so the HUD draw
+        // does not need a separate clear of the rest of the texture.
+        match self.ui_hud_pipeline.as_ref() {
+            Some(ui_pipeline) => {
+                let mut rp = render_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("draw ui hud"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &ui_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                rp.set_pipeline(ui_pipeline);
+                rp.draw(0..3, 0..1);
+            }
+            None => {
+                clear_target(
+                    &mut render_encoder,
+                    &ui_view,
+                    wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    },
+                    "clear ui",
+                );
+            }
+        }
 
         // --- (5) tag the four DLSS-G inputs on a DEDICATED raw-only encoder. ---
         // The tag is recorded onto this encoder's raw ID3D12GraphicsCommandList; it must have no wgpu
@@ -578,6 +718,15 @@ impl GpuState {
             state.estimated_vram_usage_in_bytes / (1024 * 1024),
         );
     }
+}
+
+/// Whether UI recomposition was requested via the `--ui` CLI flag or the `FG_UI=1` environment
+/// variable. When set, DLSS-G UI recomposition is enabled and an opaque HUD rectangle is drawn into
+/// the tagged UI texture each frame.
+fn ui_requested() -> bool {
+    let from_args = std::env::args().any(|arg| arg == "--ui");
+    let from_env = std::env::var("FG_UI").map(|v| v == "1").unwrap_or(false);
+    from_args || from_env
 }
 
 /// Creates a 2D render-resolution input texture (TEXTURE_BINDING + RENDER_ATTACHMENT) of the given

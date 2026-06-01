@@ -78,6 +78,13 @@ debug_overlay = []
 name = "ray_reconstruction"
 required-features = ["ray-reconstruction"]
 
+# The SR/RR toggle example holds both a Super Resolution and a Ray Reconstruction context (sharing
+# one DlssSdk) and evaluates one feature per frame. It needs the ray-reconstruction feature; SR is
+# in the default set.
+[[example]]
+name = "sr_rr_toggle"
+required-features = ["ray-reconstruction"]
+
 # The Frame Generation example only builds when its feature is enabled (it uses the Streamline FG
 # API, which is gated behind `frame-generation`).
 [[example]]
