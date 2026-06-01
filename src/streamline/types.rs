@@ -922,6 +922,10 @@ const _: () = {
     assert!(core::mem::size_of::<DLSSGOptions>() == 120);
     assert!(core::mem::size_of::<DLSSGState>() == 88);
     assert!(core::mem::size_of::<ReflexOptions>() == 48);
+    // Preferences is the first and most ABI-sensitive struct passed to slInit (a 1-byte bool, several
+    // u32-width enums, a u64 flags, and six raw pointers — exactly where a transcription slip
+    // silently corrupts every later field). Pin its size like the rest.
+    assert!(core::mem::size_of::<Preferences>() == 144);
 
     // Offset asserts on the highest-value fields. Sizes alone cannot catch a transposition of two
     // equally-sized fields or a padding miscalculation; these pin the exact byte offset (verified
@@ -931,4 +935,9 @@ const _: () = {
     assert!(core::mem::offset_of!(DLSSGOptions, on_error_callback) == 96);
     assert!(core::mem::offset_of!(DLSSGState, inputs_processing_completion_fence) == 64);
     assert!(core::mem::offset_of!(Constants, min_relative_linear_depth_object_separation) == 452);
+    // Preferences: pin the scalar/pointer boundaries (the first pointer member after the small
+    // header, the u64 flags, and the trailing render_api enum).
+    assert!(core::mem::offset_of!(Preferences, paths_to_plugins) == 40);
+    assert!(core::mem::offset_of!(Preferences, flags) == 88);
+    assert!(core::mem::offset_of!(Preferences, render_api) == 136);
 };

@@ -18,6 +18,7 @@ use std::{
 /// resolution, perf/quality mode, or feature flags) change.
 pub struct DlssContext {
     upscaled_resolution: UVec2,
+    optimal_render_resolution: UVec2,
     min_render_resolution: UVec2,
     max_render_resolution: UVec2,
     device: wgpu::Device,
@@ -104,6 +105,7 @@ impl DlssContext {
 
         Ok(Self {
             upscaled_resolution,
+            optimal_render_resolution: optimal,
             min_render_resolution: min,
             max_render_resolution: max,
             device: device.clone(),
@@ -250,9 +252,12 @@ impl DlssContext {
         self.upscaled_resolution
     }
 
-    /// The resolution the camera should render at, pre-upscaling.
+    /// The recommended (optimal) render resolution for the chosen quality mode, pre-upscaling. This
+    /// is the resolution NGX was created with (`InWidth`/`InHeight`), so the caller must render here
+    /// to avoid a per-frame feature recreate / suboptimal reconstruction. Use
+    /// [`Self::render_resolution_range`] for dynamic scaling between min and max.
     pub fn render_resolution(&self) -> UVec2 {
-        self.min_render_resolution
+        self.optimal_render_resolution
     }
 
     /// Render-resolution range for dynamic resolution scaling.
@@ -265,9 +270,12 @@ impl Drop for DlssContext {
     fn drop(&mut self) {
         // Wait for the GPU to finish using the feature before releasing it.
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        let _sdk = self.sdk.lock().unwrap();
+        // Never panic across the FFI boundary in Drop. A `.unwrap()` here would panic on a poisoned
+        // mutex (e.g. a prior panic while another context held the lock during NGX FFI), turning into
+        // a double-panic -> process abort during unwind. Recover the guard instead: a poisoned lock
+        // does not invalidate the NGX parameter pointer, so ReleaseFeature can still run.
+        let _sdk = self.sdk.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
-            // Never panic across the FFI boundary in Drop; log and move on.
             if let Err(e) = check_ngx_result(NVSDK_NGX_D3D12_ReleaseFeature(self.feature)) {
                 log::error!("Failed to release DlssContext feature: {e}");
             }
