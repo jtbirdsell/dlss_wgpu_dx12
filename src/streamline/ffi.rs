@@ -18,23 +18,39 @@ use super::security::verify_interposer_signature;
 use super::types::*;
 use core::ffi::c_void;
 use libloading::os::windows as ll;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// Environment variable that points at the Streamline SDK root.
 const STREAMLINE_SDK_ENV: &str = "STREAMLINE_SDK";
 
-/// Resolve the absolute path to the production interposer from `$STREAMLINE_SDK/bin/x64`.
+/// Build the absolute path to the interposer (`<sdk>/bin/x64/sl.interposer.dll`) from an explicit
+/// SDK root, or [`StreamlineError::SdkPathNotSet`] if `sdk` is `None`.
+///
+/// Split from [`interposer_path`] (which reads the env var) so the path-building + missing-SDK logic
+/// is unit-testable without mutating the process environment.
 ///
 /// The runner places the loader shim (sl.interposer.dll copied as dxgi.dll + d3d12.dll) next to the
 /// exe separately; THIS path is only used to obtain the exported `sl*` entry points.
-fn interposer_path() -> Result<PathBuf, StreamlineError> {
-    let sdk = std::env::var_os(STREAMLINE_SDK_ENV).ok_or(StreamlineError::SdkPathNotSet)?;
+fn interposer_path_from(sdk: Option<OsString>) -> Result<PathBuf, StreamlineError> {
+    let sdk = sdk.ok_or(StreamlineError::SdkPathNotSet)?;
     let mut path = PathBuf::from(sdk);
     path.push("bin");
     path.push("x64");
     path.push("sl.interposer.dll");
+    Ok(path)
+}
+
+/// Resolve the interposer path from an explicit SDK root and confirm the file exists on disk,
+/// mapping the two pre-load failure modes ([`StreamlineError::SdkPathNotSet`] /
+/// [`StreamlineError::InterposerNotFound`]). Split from [`SlApi::load`] so those branches are
+/// unit-testable without loading a DLL.
+fn resolve_existing_interposer(sdk: Option<OsString>) -> Result<PathBuf, StreamlineError> {
+    let path = interposer_path_from(sdk)?;
+    if !path.exists() {
+        return Err(StreamlineError::InterposerNotFound(path));
+    }
     Ok(path)
 }
 
@@ -171,10 +187,7 @@ impl SlApi {
     /// `unsafe extern "C"` pointers; calling them is `unsafe`. Must be called on Windows with the
     /// Streamline SDK installed.
     pub unsafe fn load() -> Result<Self, StreamlineError> {
-        let path = interposer_path()?;
-        if !path.exists() {
-            return Err(StreamlineError::InterposerNotFound(path));
-        }
+        let path = resolve_existing_interposer(std::env::var_os(STREAMLINE_SDK_ENV))?;
 
         // Hard gate: refuse to load an interposer that is not a trusted, NVIDIA-signed binary. We
         // verify and load the SAME `path` value (no canonicalization: a `\\?\` verbatim path breaks
@@ -417,5 +430,48 @@ impl StreamlineApi for SlApi {
         // SAFETY: slInit succeeded and shutdown is called once per the caller's contract;
         // `sl_shutdown` is the resolved core export.
         unsafe { (self.sl_shutdown)() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Headless tests for the interposer-path resolution (the two pre-load failure modes). They
+    //! never load a DLL and inject the SDK root explicitly, so they do not touch the process
+    //! environment.
+
+    use super::{interposer_path_from, resolve_existing_interposer};
+    use super::StreamlineError;
+    use std::ffi::OsString;
+
+    #[test]
+    fn missing_sdk_env_is_reported() {
+        assert!(matches!(
+            interposer_path_from(None),
+            Err(StreamlineError::SdkPathNotSet)
+        ));
+        assert!(matches!(
+            resolve_existing_interposer(None),
+            Err(StreamlineError::SdkPathNotSet)
+        ));
+    }
+
+    #[test]
+    fn path_is_built_under_bin_x64() {
+        let p = interposer_path_from(Some(OsString::from("C:/some/sdk"))).unwrap();
+        assert_eq!(p.file_name().unwrap(), "sl.interposer.dll");
+        assert!(p.components().any(|c| c.as_os_str() == "bin"));
+        assert!(p.components().any(|c| c.as_os_str() == "x64"));
+    }
+
+    #[test]
+    fn missing_interposer_file_is_reported() {
+        // An SDK root with no `bin/x64/sl.interposer.dll` under it must map to InterposerNotFound
+        // (not a panic / not SdkPathNotSet). A nonexistent root suffices — the check is on the file.
+        let sdk = std::env::temp_dir().join("dlss_wgpu_dx12_nonexistent_sdk_root_for_test");
+        let result = resolve_existing_interposer(Some(sdk.into_os_string()));
+        assert!(matches!(
+            result,
+            Err(StreamlineError::InterposerNotFound(_))
+        ));
     }
 }
