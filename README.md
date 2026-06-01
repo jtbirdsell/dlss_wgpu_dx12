@@ -102,7 +102,9 @@ context.render(
         dlss_output: DlssTexture { texture: &upscaled_output },
         reset: false,
         jitter_offset: jitter,
-        partial_texture_size: None,
+        // Pin the eval subrect to the size you actually rendered (here, render_resolution()).
+        // Leaving this None defaults to the max render resolution, which mismatches smaller inputs.
+        partial_texture_size: Some(render_resolution),
         motion_vector_scale: None,
     },
     &queue,

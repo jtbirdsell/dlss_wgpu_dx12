@@ -15,6 +15,10 @@ use uuid::Uuid;
 /// their `new`/`render`) *before* the last `Arc<Mutex<DlssSdk>>` clone is dropped. The SDK's `Drop`
 /// waits for the GPU to idle, then destroys the NGX parameters and shuts NGX down for the device;
 /// releasing it while feature handles are still live is unsupported.
+///
+/// **Frame Generation does not use this object.** FG runs through a separate `Streamline` handle with
+/// its own init/drop ordering (the `frame-generation` feature) — SR/RR and FG are independent NGX
+/// entry points, so an app using both manages two lifecycles.
 pub struct DlssSdk {
     pub(crate) parameters: *mut NVSDK_NGX_Parameter,
     pub(crate) device: wgpu::Device,

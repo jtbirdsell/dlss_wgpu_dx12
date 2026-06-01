@@ -49,3 +49,20 @@ pub use streamline::{
     FgConstants, FgResource, FgResources, FgUi, Frame, FrameGenerationContext, FrameGenerationMode,
     FrameGenerationOptions, FrameGenerationState, Streamline, StreamlineError,
 };
+
+/// A crate-level umbrella error for applications that drive both the NGX (Super Resolution /
+/// Ray Reconstruction) and Streamline (Frame Generation) paths and want a single `?`-able error.
+///
+/// The domain errors (`DlssError`, `StreamlineError`) remain available and unchanged; this is purely
+/// additive and converts from each via `?`/`From`. SR/RR and FG are independent NGX entry points, so
+/// the two domains are kept as separate variants rather than merged.
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    /// An error from the NGX (Super Resolution / Ray Reconstruction) path.
+    #[error(transparent)]
+    Dlss(#[from] DlssError),
+    /// An error from the Streamline (Frame Generation) path.
+    #[cfg(feature = "frame-generation")]
+    #[error(transparent)]
+    Streamline(#[from] StreamlineError),
+}
