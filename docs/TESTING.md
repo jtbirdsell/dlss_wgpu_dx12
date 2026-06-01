@@ -55,25 +55,37 @@ cargo test --features ray-reconstruction --test headless -- --ignored --nocaptur
 cargo test --features frame-generation --test headless -- --ignored --nocapture
 ```
 
-## Widening the matrix: GPU CI (not built here)
+## Why there is no GPU CI
 
 `.github/workflows/ci.yml` runs on GitHub-hosted runners with **no GPU**, so the real-evaluate tier
-is not exercised in CI today. Two ways to add it (the tests are already CI-shaped — they self-stage
-DLLs and skip when unsupported):
+is not exercised in CI — and deliberately stays that way. The two ways to add GPU CI both fail for
+this repository:
 
-- **Self-hosted runner** — your own RTX box, or a cloud Ada/Ampere instance you register. A
-  `workflow_dispatch` job with `runs-on: [self-hosted, windows, gpu]` that sets `DLSS_SDK`
-  (and `STREAMLINE_SDK` for FG), then runs
-  `cargo test --features ray-reconstruction --test headless -- --ignored`. Covers SR + RR + the FG
-  contract on whatever GPU the runner has. No premium billing; you maintain the runner.
-- **GitHub-hosted GPU larger runner** (NVIDIA **T4**, Turing) — available on Team/Enterprise plans,
-  premium per-minute. A T4 is a **different architecture** than the 4090, so it takes SR/RR to n=2
-  automatically. It **cannot** validate Frame Generation: DLSS-G needs an Ada (RTX 40-series)+ GPU
-  *and* a composited display, while a T4 is Turing and headless — the FG tests will skip
-  (`FeatureNotSupported`).
+- **GitHub-hosted GPU runners** (NVIDIA T4 larger runners) require a paid **Team/Enterprise** plan.
+- **Self-hosted runners** are a security risk on a **public** repository: a pull request from a fork
+  can run arbitrary code on the runner machine. GitHub explicitly recommends against using
+  self-hosted runners with public repos for exactly this reason. A `workflow_dispatch`-only job
+  reduces but does not eliminate that posture, and it is not worth the hardening burden here.
 
-For FG on either runner you must also stage the Streamline `sl.*` plugins + the `dxgi.dll`/`d3d12.dll`
-loader-shim copies next to the test binary (see [SETUP.md §5.3](SETUP.md)).
+So the real-evaluate **proof lives in the test code, not in CI infrastructure.** The `#[ignore]`d
+hardware tests are output-asserted and skip-safe, so anyone with an RTX GPU reproduces them on
+demand. CI covers everything that does **not** need a GPU: builds, clippy, the Frame-Generation mock
+state machine, the loader-path + signature error paths, and all the pure-logic tests.
+
+## Widening the matrix (n > 1)
+
+Breadth — validating on more than one GPU generation / driver — is a **manual, on-hardware** step,
+not a CI job. A maintainer or contributor runs the `#[ignore]`d tests on their own RTX hardware and
+reports the result; the tests skip cleanly on non-NVIDIA / unsupported devices, so this is safe to
+ask of anyone:
+
+```powershell
+cargo test --features ray-reconstruction --test headless -- --ignored --nocapture
+```
+
+A passing run on a different architecture (Turing / Ampere / Ada / Blackwell) or a newer driver is a
+fresh data point — note notable results in the PR that adds them. (If GPU validation ever moves to a
+**private** fork, a self-hosted runner there is fine — the public-repo fork-PR risk does not apply.)
 
 ## The ceiling: FG real generation is manual
 
