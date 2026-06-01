@@ -29,15 +29,15 @@
 //! 4. Set `camera_motion_included = true` when the mvec buffer carries full motion.
 //! 5. Use a **non-vsync present mode** (`Mailbox`/`Immediate`) so Reflex/DLSS-G own frame pacing.
 
+use super::api::StreamlineApi;
 use super::ffi::SlApi;
-use super::reflex;
 use super::tagging::{dxgi_format_of, FgConstants, FgResources};
 use super::types::*;
 use crate::hal;
+use core::ffi::c_void;
 use glam::UVec2;
 use std::cell::Cell;
 use std::ffi::CString;
-use std::ptr;
 
 /// SL 2.11.1 `kSDKVersion`: `(2<<48)|(11<<32)|(1<<16)|0xfedc` (sl_version.h).
 const SL_SDK_VERSION: u64 = (2u64 << 48) | (11u64 << 32) | (1u64 << 16) | 0xfedc;
@@ -61,7 +61,7 @@ pub const DEFAULT_ENGINE_VERSION: &str = "0.1.0";
 /// becomes a no-op (the context's `Drop` runs `slShutdown` instead). A *failed*
 /// `FrameGenerationContext::new` leaves this handle intact and reusable.
 pub struct Streamline {
-    api: Option<SlApi>,
+    api: Option<Box<dyn StreamlineApi>>,
 }
 
 impl Streamline {
@@ -137,7 +137,9 @@ impl Streamline {
             });
         }
         log::info!("Streamline initialized (DLSS-G + Reflex + PCL)");
-        Ok(Self { api: Some(api) })
+        Ok(Self {
+            api: Some(Box::new(api)),
+        })
     }
 }
 
@@ -146,9 +148,9 @@ impl Drop for Streamline {
         // If a context took the API (the success path of `FrameGenerationContext::new`), it is
         // responsible for slShutdown on its own drop. Only shut down here if we still own it.
         if let Some(api) = self.api.as_ref() {
-            // SAFETY: `api.sl_shutdown` is the resolved interposer export; slInit succeeded in
+            // SAFETY: `shutdown` forwards to the resolved interposer export; slInit succeeded in
             // `init`. Never panic across FFI in Drop — log and continue.
-            let r = unsafe { (api.sl_shutdown)() };
+            let r = unsafe { api.shutdown() };
             if !r.is_ok() {
                 log::error!("slShutdown returned {r:?}");
             }
@@ -265,7 +267,7 @@ pub struct FrameGenerationState {
 /// It owns the Streamline core API for its lifetime and runs `slShutdown` on `Drop`. Drive one
 /// [`Frame`] per rendered frame via [`Self::begin_frame`].
 pub struct FrameGenerationContext {
-    api: SlApi,
+    api: Box<dyn StreamlineApi>,
     device: wgpu::Device,
     viewport: ViewportHandle,
     options: FrameGenerationOptions,
@@ -312,7 +314,7 @@ impl FrameGenerationContext {
         // this wgpu device, valid only for the duration of the closure; we only forward it to
         // `slSetD3DDevice`, the resolved interposer export.
         let set = unsafe {
-            hal::with_raw_device(device, |raw_device| (api.sl_set_d3d_device)(raw_device.cast()))
+            hal::with_raw_device(device, |raw_device| api.set_d3d_device(raw_device.cast()))
         };
         match set {
             Some(r) if r.is_ok() => log::info!("slSetD3DDevice -> eOk (before swapchain creation)"),
@@ -353,20 +355,26 @@ impl FrameGenerationContext {
             );
         }
         // SAFETY: `adapter_info` is a fully-initialized `sl::AdapterInfo` whose LUID buffer (`luid`)
-        // outlives the call; `sl_is_feature_supported` is the resolved interposer export.
-        let supported = unsafe { (api.sl_is_feature_supported)(K_FEATURE_DLSS_G, &adapter_info) };
+        // outlives the call; `is_feature_supported` forwards to the resolved interposer export.
+        let supported = unsafe { api.is_feature_supported(K_FEATURE_DLSS_G, &adapter_info) };
         log::info!("slIsFeatureSupported(kFeatureDLSS_G) -> {supported:?}");
         if !supported.is_ok() {
             return Err(StreamlineError::FeatureNotSupported(supported));
         }
 
         // --- slReflexSetOptions(eLowLatency) — Reflex must be active or DLSS-G fails ---
-        // SAFETY: feature functions were resolved above; the interposer is initialized.
-        unsafe { reflex::set_reflex_mode(api, ReflexMode::LowLatency)? };
+        // The feature functions were resolved above; a non-Ok result is an SlCall failure.
+        let reflex = api.reflex_set_options(ReflexMode::LowLatency)?;
+        if !reflex.is_ok() {
+            return Err(StreamlineError::SlCall {
+                function: "slReflexSetOptions".to_string(),
+                result: reflex,
+            });
+        }
         log::info!("slReflexSetOptions(eLowLatency) -> eOk");
 
         // --- slDLSSGSetOptions(mode) on the borrowed api (still fallible, before the move) ---
-        apply_dlssg_options(api, &viewport, options, color_format)?;
+        apply_dlssg_options(&**api, &viewport, options, color_format)?;
         let dlssg_enabled = options.mode != FrameGenerationMode::Off;
         let last_enabled_mode = if dlssg_enabled {
             options.mode
@@ -395,7 +403,7 @@ impl FrameGenerationContext {
 
     /// Re-applies the current [`self.options`] via `slDLSSGSetOptions`. Used by [`Self::set_mode`].
     fn apply_dlssg_options(&mut self) -> Result<(), StreamlineError> {
-        apply_dlssg_options(&self.api, &self.viewport, &self.options, self.color_format)?;
+        apply_dlssg_options(&*self.api, &self.viewport, &self.options, self.color_format)?;
         self.dlssg_enabled = self.options.mode != FrameGenerationMode::Off;
         if self.dlssg_enabled {
             self.last_enabled_mode = self.options.mode;
@@ -435,39 +443,7 @@ impl FrameGenerationContext {
     /// dropped within the same frame it was begun for (see [`Frame`] — the token is stale after
     /// present). `&mut self` makes the per-frame sequence single-threaded.
     pub fn begin_frame(&mut self, frame_index: u32) -> Result<Frame<'_>, StreamlineError> {
-        let mut token: *mut FrameToken = ptr::null_mut();
-        // SAFETY: `&frame_index` is a valid `*const u32` out-param input; `&mut token` is a valid
-        // out-param; `sl_get_new_frame_token` is the resolved interposer export.
-        let r = unsafe { (self.api.sl_get_new_frame_token)(&mut token, &frame_index) };
-        if !r.is_ok() {
-            return Err(StreamlineError::SlCall {
-                function: "slGetNewFrameToken".to_string(),
-                result: r,
-            });
-        }
-        if token.is_null() {
-            return Err(StreamlineError::FeatureFunctionUnavailable {
-                feature: K_FEATURE_DLSS_G,
-                function: "slGetNewFrameToken".to_string(),
-                detail: "returned eOk but a null frame token".to_string(),
-            });
-        }
-
-        // Reflex pacing point, then the simulation-phase markers (proven order).
-        // SAFETY: `token` is the just-acquired live frame token; feature fns are resolved.
-        unsafe {
-            reflex::reflex_sleep(&self.api, token);
-            reflex::set_marker(&self.api, PCLMarker::SimulationStart, token);
-            reflex::set_marker(&self.api, PCLMarker::SimulationEnd, token);
-        }
-
-        Ok(Frame {
-            ctx: self,
-            token,
-            frame_index,
-            step: Cell::new(Step::Begun),
-            presented: Cell::new(false),
-        })
+        begin_frame_with(&*self.api, self.viewport, frame_index)
     }
 
     /// Queries `slDLSSGGetState` and decodes it into a [`FrameGenerationState`].
@@ -478,55 +454,95 @@ impl FrameGenerationContext {
     /// The query is built with the **last-enabled** mode (never `Off`), so a transient
     /// [`Self::set_mode`]`(Off)` does not mask the real runtime status (finding G).
     pub fn query_state(&self) -> Result<FrameGenerationState, StreamlineError> {
-        let get = self.api.sl_dlssg_get_state.ok_or_else(|| {
-            StreamlineError::FeatureFunctionUnavailable {
-                feature: K_FEATURE_DLSS_G,
-                function: "slDLSSGGetState".to_string(),
-                detail: "feature function not resolved".to_string(),
-            }
-        })?;
-        let mut state = DLSSGState::new();
-        let mut opts = DLSSGOptions::new();
-        // Build with the last-enabled mode (defaults to On) so a transient Off does not suppress the
-        // real status the runtime reports.
-        opts.mode = self.last_enabled_mode.to_sl();
-        opts.num_frames_to_generate = self.options.num_frames_to_generate;
-        // SAFETY: `&self.viewport` is valid; `&mut state` and `&opts` are valid in/out params; `get`
-        // is the resolved DLSS-G feature fn.
-        let r = unsafe { get(&self.viewport, &mut state, &opts) };
-        if !r.is_ok() {
-            return Err(StreamlineError::SlCall {
-                function: "slDLSSGGetState".to_string(),
-                result: r,
-            });
-        }
-        Ok(FrameGenerationState {
-            status: state.status,
-            status_text: dlssg_status::decode(state.status),
-            is_ok: state.status == dlssg_status::OK,
-            num_frames_actually_presented: state.num_frames_actually_presented,
-            num_frames_to_generate_max: state.num_frames_to_generate_max,
-            estimated_vram_usage_in_bytes: state.estimated_vram_usage_in_bytes,
-        })
+        query_state_with(
+            &*self.api,
+            &self.viewport,
+            // Build with the last-enabled mode (defaults to On) so a transient Off does not suppress
+            // the real status the runtime reports.
+            self.last_enabled_mode.to_sl(),
+            self.options.num_frames_to_generate,
+        )
     }
+}
+
+/// Begins a DLSS-G frame against a borrowed [`StreamlineApi`]: `slGetNewFrameToken(frame_index)` →
+/// `slReflexSleep` → PCL `eSimulationStart` + `eSimulationEnd`, returning a [`Frame`] at
+/// [`Step::Begun`]. Factored out of [`FrameGenerationContext::begin_frame`] so the per-frame
+/// sequence can be driven against a mock api (no `wgpu::Device` required).
+fn begin_frame_with<'a>(
+    api: &'a dyn StreamlineApi,
+    viewport: ViewportHandle,
+    frame_index: u32,
+) -> Result<Frame<'a>, StreamlineError> {
+    // SAFETY: `get_new_frame_token` is the resolved interposer export; the returned token is opaque
+    // and only ever passed back to other sl* calls this frame.
+    let (r, token) = unsafe { api.get_new_frame_token(frame_index) };
+    if !r.is_ok() {
+        return Err(StreamlineError::SlCall {
+            function: "slGetNewFrameToken".to_string(),
+            result: r,
+        });
+    }
+    if token.is_null() {
+        return Err(StreamlineError::FeatureFunctionUnavailable {
+            feature: K_FEATURE_DLSS_G,
+            function: "slGetNewFrameToken".to_string(),
+            detail: "returned eOk but a null frame token".to_string(),
+        });
+    }
+
+    // Reflex pacing point, then the simulation-phase markers (proven order).
+    // SAFETY: `token` is the just-acquired live frame token; feature fns are resolved.
+    unsafe {
+        api.reflex_sleep(token);
+        api.set_marker(PCLMarker::SimulationStart, token);
+        api.set_marker(PCLMarker::SimulationEnd, token);
+    }
+
+    Ok(Frame::new_begun(api, viewport, token, frame_index))
+}
+
+/// Queries `slDLSSGGetState` against a borrowed [`StreamlineApi`] and decodes it into a
+/// [`FrameGenerationState`]. Factored out of [`FrameGenerationContext::query_state`] so the decode +
+/// query-mode logic can be tested against a mock api.
+fn query_state_with(
+    api: &dyn StreamlineApi,
+    viewport: &ViewportHandle,
+    mode: DLSSGMode,
+    num_frames_to_generate: u32,
+) -> Result<FrameGenerationState, StreamlineError> {
+    let mut state = DLSSGState::new();
+    let mut opts = DLSSGOptions::new();
+    opts.mode = mode;
+    opts.num_frames_to_generate = num_frames_to_generate;
+    // SAFETY: `viewport` is valid; `&mut state` and `&opts` are valid in/out params; the trait impl
+    // forwards to the resolved DLSS-G feature fn (or returns FeatureFunctionUnavailable).
+    let r = unsafe { api.dlssg_get_state(viewport, &mut state, &opts) }?;
+    if !r.is_ok() {
+        return Err(StreamlineError::SlCall {
+            function: "slDLSSGGetState".to_string(),
+            result: r,
+        });
+    }
+    Ok(FrameGenerationState {
+        status: state.status,
+        status_text: dlssg_status::decode(state.status),
+        is_ok: state.status == dlssg_status::OK,
+        num_frames_actually_presented: state.num_frames_actually_presented,
+        num_frames_to_generate_max: state.num_frames_to_generate_max,
+        estimated_vram_usage_in_bytes: state.estimated_vram_usage_in_bytes,
+    })
 }
 
 /// Builds + applies the `sl::DLSSGOptions` from `options` against a borrowed `api`. Shared by
 /// [`FrameGenerationContext::new`] (pre-move, on a borrowed `&SlApi`) and
 /// [`FrameGenerationContext::apply_dlssg_options`].
 fn apply_dlssg_options(
-    api: &SlApi,
+    api: &dyn StreamlineApi,
     viewport: &ViewportHandle,
     options: &FrameGenerationOptions,
     color_format: u32,
 ) -> Result<(), StreamlineError> {
-    let set = api.sl_dlssg_set_options.ok_or_else(|| {
-        StreamlineError::FeatureFunctionUnavailable {
-            feature: K_FEATURE_DLSS_G,
-            function: "slDLSSGSetOptions".to_string(),
-            detail: "feature function not resolved".to_string(),
-        }
-    })?;
     let mut opts = DLSSGOptions::new();
     opts.mode = options.mode.to_sl();
     opts.num_frames_to_generate = options.num_frames_to_generate;
@@ -541,8 +557,9 @@ fn apply_dlssg_options(
         opts.ui_buffer_format = options.ui_format.unwrap_or(0);
     }
     // SAFETY: `opts` is a fully-initialized `sl::DLSSGOptions` living on the stack through the call;
-    // `viewport` is valid; `set` is the resolved DLSS-G feature fn.
-    let r = unsafe { set(viewport, &opts) };
+    // `viewport` is valid; the trait impl forwards to the resolved DLSS-G feature fn (or returns
+    // FeatureFunctionUnavailable if it was never resolved).
+    let r = unsafe { api.dlssg_set_options(viewport, &opts) }?;
     if !r.is_ok() {
         return Err(StreamlineError::SlCall {
             function: "slDLSSGSetOptions".to_string(),
@@ -561,18 +578,18 @@ fn apply_dlssg_options(
 impl Drop for FrameGenerationContext {
     fn drop(&mut self) {
         // Disable DLSS-G, idle the GPU, then shut Streamline down. Never panic across FFI in Drop.
-        if let Some(set) = self.api.sl_dlssg_set_options {
-            let mut opts = DLSSGOptions::new();
-            opts.mode = DLSSGMode::Off;
-            // SAFETY: `opts`/`&self.viewport` are valid; `set` is the resolved feature fn.
-            let r = unsafe { set(&self.viewport, &opts) };
-            if !r.is_ok() {
-                log::error!("slDLSSGSetOptions(eOff) during drop returned {r:?}");
-            }
+        let mut opts = DLSSGOptions::new();
+        opts.mode = DLSSGMode::Off;
+        // SAFETY: `opts`/`&self.viewport` are valid; the trait impl forwards to the resolved feature
+        // fn. `Err` (feature fn never resolved) means there is nothing to disable — swallow it.
+        if let Ok(r) = unsafe { self.api.dlssg_set_options(&self.viewport, &opts) }
+            && !r.is_ok()
+        {
+            log::error!("slDLSSGSetOptions(eOff) during drop returned {r:?}");
         }
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        // SAFETY: `sl_shutdown` is the resolved interposer export; slInit succeeded.
-        let r = unsafe { (self.api.sl_shutdown)() };
+        // SAFETY: `shutdown` forwards to the resolved interposer export; slInit succeeded.
+        let r = unsafe { self.api.shutdown() };
         if !r.is_ok() {
             log::error!("slShutdown during drop returned {r:?}");
         }
@@ -649,7 +666,12 @@ impl Step {
 /// dropped before [`Self::present`] `log::error!`s (it indicates a skipped / aborted frame). This
 /// catches sequencing mistakes without a heavy consuming-`self` typestate.
 pub struct Frame<'a> {
-    ctx: &'a FrameGenerationContext,
+    /// The Streamline call surface (the context's api, borrowed for this frame). Holding the trait
+    /// object (not `&FrameGenerationContext`) is what lets a test drive the per-frame sequence
+    /// against a mock with no `wgpu::Device`.
+    api: &'a dyn StreamlineApi,
+    /// The context's viewport handle (a `Copy` value, snapshotted at `begin_frame`).
+    viewport: ViewportHandle,
     token: *mut FrameToken,
     /// The frame index this frame was begun for; drives the auto-reset on frame 0.
     frame_index: u32,
@@ -657,13 +679,39 @@ pub struct Frame<'a> {
     step: Cell<Step>,
     /// Set once [`Self::present`] runs, so [`Drop`] can detect an aborted frame.
     presented: Cell<bool>,
+    /// Test-only: set by [`Self::advance`] when a step is called out of order, so the mis-order can
+    /// be asserted independent of build profile (the `debug_assert!` only fires in debug builds).
+    #[cfg(test)]
+    misordered: Cell<bool>,
 }
 
 impl<'a> Frame<'a> {
+    /// Builds a freshly-begun frame (at [`Step::Begun`]). Used by [`begin_frame_with`] and, in
+    /// tests, to construct a frame over a mock api.
+    fn new_begun(
+        api: &'a dyn StreamlineApi,
+        viewport: ViewportHandle,
+        token: *mut FrameToken,
+        frame_index: u32,
+    ) -> Self {
+        Self {
+            api,
+            viewport,
+            token,
+            frame_index,
+            step: Cell::new(Step::Begun),
+            presented: Cell::new(false),
+            #[cfg(test)]
+            misordered: Cell::new(false),
+        }
+    }
+
     /// Records that we are advancing from `expected` to `to`, logging/asserting on a mis-order.
     fn advance(&self, expected: Step, to: Step) {
         let current = self.step.get();
         if current != expected {
+            #[cfg(test)]
+            self.misordered.set(true);
             debug_assert!(
                 false,
                 "DLSS-G Frame: {} called out of order (expected to be at {:?}, but was at {:?})",
@@ -687,6 +735,58 @@ impl<'a> Frame<'a> {
         self.frame_index
     }
 
+    /// The orderable core of [`Self::acquire`]: advance the step and emit the PCL render-submit-start
+    /// marker. Split out (no wgpu) so the per-frame ordering can be exercised against a mock api.
+    fn acquire_core(&self) {
+        self.advance(Step::Constants, Step::Acquired);
+        // SAFETY: `self.token` is this frame's live token; PCL marker is best-effort.
+        unsafe { self.api.set_marker(PCLMarker::RenderSubmitStart, self.token) };
+    }
+
+    /// The orderable core of [`Self::tag`]: advance the step and call `slSetTagForFrame` with an
+    /// already-built tag list and the raw command list. Split out so a test can drive it with a
+    /// hand-built tag slice + a dummy command-list pointer (no wgpu encoder).
+    ///
+    /// Note: `advance` runs here, *after* the public [`Self::tag`] shell extracts the raw resources.
+    /// On the rare extraction-failure path (a tagged resource is not a Dx12 texture) the public
+    /// method returns before reaching this core, so the step stays at `Acquired` rather than
+    /// advancing — an inert difference, since that frame is already failing.
+    fn tag_core(&self, tags: &[ResourceTag], cmd_list: *mut c_void) -> Result<(), StreamlineError> {
+        self.advance(Step::Acquired, Step::Tagged);
+        // SAFETY: `tags` points at `tags.len()` live `ResourceTag`s; `self.token`/`&self.viewport`
+        // are valid; `cmd_list` is the encoder's open list (or a dummy the mock never derefs);
+        // `set_tag_for_frame` forwards to the resolved export.
+        let r = unsafe {
+            self.api.set_tag_for_frame(
+                self.token,
+                &self.viewport,
+                tags.as_ptr(),
+                tags.len() as u32,
+                cmd_list,
+            )
+        };
+        if r.is_ok() {
+            Ok(())
+        } else {
+            Err(StreamlineError::SlCall {
+                function: "slSetTagForFrame".to_string(),
+                result: r,
+            })
+        }
+    }
+
+    /// The orderable core of [`Self::present`]: advance the step, bracket `do_present` with the PCL
+    /// present-start / present-end markers, and mark the frame presented. The public method passes
+    /// `|| surface_texture.present()`; a test passes a no-op (or a recording) closure.
+    fn present_core(&self, do_present: impl FnOnce()) {
+        self.advance(Step::RenderEnded, Step::Presented);
+        // SAFETY (both markers): `self.token` is this frame's live token; PCL markers are best-effort.
+        unsafe { self.api.set_marker(PCLMarker::PresentStart, self.token) };
+        do_present();
+        unsafe { self.api.set_marker(PCLMarker::PresentEnd, self.token) };
+        self.presented.set(true);
+    }
+
     /// `slSetConstants` for this frame: camera matrices, jitter, mvec scale, reset, etc.
     ///
     /// **Auto-reset:** if this frame's index is `0`, `reset` is forced `true` (there is no valid
@@ -702,11 +802,9 @@ impl<'a> Frame<'a> {
             sl_consts.reset = Boolean::True;
         }
         // SAFETY: `sl_consts` is a fully-initialized `sl::Constants` on the stack through the call;
-        // `self.token` is this frame's live token; `&self.ctx.viewport` is valid; `sl_set_constants`
-        // is the resolved interposer export.
-        let r = unsafe {
-            (self.ctx.api.sl_set_constants)(&sl_consts, self.token, &self.ctx.viewport)
-        };
+        // `self.token` is this frame's live token; `&self.viewport` is valid; `set_constants`
+        // forwards to the resolved interposer export.
+        let r = unsafe { self.api.set_constants(&sl_consts, self.token, &self.viewport) };
         if r.is_ok() {
             Ok(())
         } else {
@@ -737,10 +835,9 @@ impl<'a> Frame<'a> {
         &self,
         surface: &wgpu::Surface,
     ) -> Result<(wgpu::SurfaceTexture, u32), StreamlineError> {
-        self.advance(Step::Constants, Step::Acquired);
-        // (1) PCL render-submit-start.
-        // SAFETY: `self.token` is this frame's live token; PCL fn is resolved.
-        unsafe { reflex::set_marker(&self.ctx.api, PCLMarker::RenderSubmitStart, self.token) };
+        // (1) The orderable core (state advance + PCL render-submit-start marker). Runs first, so the
+        // Suboptimal / error paths below still leave the frame at `Acquired`, exactly as before.
+        self.acquire_core();
 
         // (2) Acquire the surface texture. The patched wgpu returns a `CurrentSurfaceTexture` enum.
         let texture = match surface.get_current_texture() {
@@ -789,7 +886,6 @@ impl<'a> Frame<'a> {
         encoder: &mut wgpu::CommandEncoder,
         resources: &FgResources,
     ) -> Result<(), StreamlineError> {
-        self.advance(Step::Acquired, Step::Tagged);
         let pairs = resources.tags();
 
         // Build the `sl::Resource` payloads (one per tagged buffer); keep them alive until the call
@@ -797,7 +893,7 @@ impl<'a> Frame<'a> {
         let mut sl_resources: Vec<Resource> = Vec::with_capacity(pairs.len());
         for (res, _) in &pairs {
             let native = match unsafe { hal::raw_resource(res.texture) } {
-                Some(p) => p.cast::<core::ffi::c_void>(),
+                Some(p) => p.cast::<c_void>(),
                 None => {
                     return Err(StreamlineError::FeatureFunctionUnavailable {
                         feature: K_FEATURE_DLSS_G,
@@ -826,25 +922,15 @@ impl<'a> Frame<'a> {
             ));
         }
 
-        let set_tag = self.ctx.api.sl_set_tag_for_frame;
-        let viewport = self.ctx.viewport;
-        let token = self.token;
-        let tags_ptr = tags.as_ptr();
-        let num_tags = tags.len() as u32;
+        // Extract the encoder's open raw command list and run the orderable core (advance +
+        // slSetTagForFrame) inside the borrow.
         // SAFETY: `with_raw_command_list` hands us the encoder's open raw `ID3D12GraphicsCommandList`
-        // for the duration of the closure only. `token`/`&viewport` are valid; `tags_ptr` points at
-        // `tags`, which (with `sl_resources`) outlives the call. `set_tag` is the resolved export.
+        // for the duration of the closure only; `tags` (with `sl_resources`) outlives the call.
         let r = unsafe {
-            hal::with_raw_command_list(encoder, |cmd_list| {
-                set_tag(token, &viewport, tags_ptr, num_tags, cmd_list.cast())
-            })
+            hal::with_raw_command_list(encoder, |cmd_list| self.tag_core(&tags, cmd_list.cast()))
         };
         match r {
-            Some(res) if res.is_ok() => Ok(()),
-            Some(res) => Err(StreamlineError::SlCall {
-                function: "slSetTagForFrame".to_string(),
-                result: res,
-            }),
+            Some(res) => res,
             None => Err(StreamlineError::FeatureFunctionUnavailable {
                 feature: K_FEATURE_DLSS_G,
                 function: "slSetTagForFrame".to_string(),
@@ -858,8 +944,8 @@ impl<'a> Frame<'a> {
     /// before [`Self::present`].
     pub fn end_render(&self) {
         self.advance(Step::Tagged, Step::RenderEnded);
-        // SAFETY: `self.token` is this frame's live token; PCL fn is resolved.
-        unsafe { reflex::set_marker(&self.ctx.api, PCLMarker::RenderSubmitEnd, self.token) };
+        // SAFETY: `self.token` is this frame's live token; PCL marker is best-effort.
+        unsafe { self.api.set_marker(PCLMarker::RenderSubmitEnd, self.token) };
     }
 
     /// Presents the frame, bracketing `surface_texture.present()` with the PCL `ePresentStart` /
@@ -868,12 +954,7 @@ impl<'a> Frame<'a> {
     /// This is the final step: it consumes the [`wgpu::SurfaceTexture`] returned by
     /// [`Self::acquire`] and marks the frame as completed (so [`Drop`] does not flag it as aborted).
     pub fn present(&self, surface_texture: wgpu::SurfaceTexture) {
-        self.advance(Step::RenderEnded, Step::Presented);
-        // SAFETY (both markers): `self.token` is this frame's live token; PCL fn is resolved.
-        unsafe { reflex::set_marker(&self.ctx.api, PCLMarker::PresentStart, self.token) };
-        surface_texture.present();
-        unsafe { reflex::set_marker(&self.ctx.api, PCLMarker::PresentEnd, self.token) };
-        self.presented.set(true);
+        self.present_core(|| surface_texture.present());
     }
 }
 
@@ -889,5 +970,593 @@ impl<'a> Drop for Frame<'a> {
                 self.step.get()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Headless unit tests for the DLSS-G per-frame call-order state machine.
+    //!
+    //! These drive the real [`Frame`] / [`begin_frame_with`] / [`query_state_with`] /
+    //! [`apply_dlssg_options`] code paths against a recording [`MockApi`] that implements
+    //! [`StreamlineApi`]. They never load `sl.interposer.dll`, create a `wgpu::Device`, or touch a
+    //! GPU, so they run in CI under `cargo test --features frame-generation`. The opaque token /
+    //! command-list pointers are dummy sentinels the mock never dereferences.
+    //!
+    //! What stays validated only on hardware (and is therefore exercised by the `#[ignore]`d
+    //! integration test in `tests/headless.rs`, not here): the raw D3D12 reach-through in
+    //! `crate::hal`, the real interposer load + signature verification, and that a real `slInit` /
+    //! DLSS-G actually generates a frame.
+
+    use super::*;
+    use std::sync::Mutex;
+
+    /// One recorded [`StreamlineApi`] call: its identity plus the salient scalar arguments the tests
+    /// assert on (the PCL marker kind, the forced `reset` flag, the DLSS-G options, the tagged
+    /// buffer-type order). Opaque pointers are never recorded or dereferenced.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Call {
+        SetD3DDevice,
+        ResolveFeatureFunctions,
+        IsFeatureSupported(Feature),
+        ReflexSetOptions(ReflexMode),
+        DlssgSetOptions {
+            mode: DLSSGMode,
+            num_frames: u32,
+            color_format: u32,
+            ui_recomp: bool,
+            ui_format: u32,
+        },
+        DlssgGetState {
+            query_mode: DLSSGMode,
+        },
+        GetNewFrameToken(u32),
+        ReflexSleep,
+        SetMarker(PCLMarker),
+        SetConstants {
+            reset: bool,
+        },
+        SetTagForFrame {
+            buffer_types: Vec<BufferType>,
+        },
+        Shutdown,
+    }
+
+    /// A recording, fully in-memory [`StreamlineApi`] for headless tests. It logs every call in
+    /// order and returns canned [`SlResult`]s; set one of the `*_result` fields non-Ok (or
+    /// `token_null` / `features_unresolved`) to exercise an error path. It reads only the documented
+    /// plain-data fields of the ABI structs the tests keep alive across each call — never the opaque
+    /// token / command-list / resource pointers.
+    struct MockApi {
+        calls: Mutex<Vec<Call>>,
+        set_d3d_device_result: SlResult,
+        is_feature_supported_result: SlResult,
+        reflex_set_options_result: SlResult,
+        dlssg_set_options_result: SlResult,
+        dlssg_get_state_result: SlResult,
+        get_new_frame_token_result: SlResult,
+        set_constants_result: SlResult,
+        set_tag_result: SlResult,
+        shutdown_result: SlResult,
+        /// When set, `get_new_frame_token` returns `Ok` but a null token.
+        token_null: bool,
+        /// When set, the feature-gated methods report `FeatureFunctionUnavailable`.
+        features_unresolved: bool,
+        /// Canned `slDLSSGGetState` out-params.
+        state_status: u32,
+        state_num_presented: u32,
+    }
+
+    impl Default for MockApi {
+        fn default() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                set_d3d_device_result: SlResult::Ok,
+                is_feature_supported_result: SlResult::Ok,
+                reflex_set_options_result: SlResult::Ok,
+                dlssg_set_options_result: SlResult::Ok,
+                dlssg_get_state_result: SlResult::Ok,
+                get_new_frame_token_result: SlResult::Ok,
+                set_constants_result: SlResult::Ok,
+                set_tag_result: SlResult::Ok,
+                shutdown_result: SlResult::Ok,
+                token_null: false,
+                features_unresolved: false,
+                state_status: dlssg_status::OK,
+                state_num_presented: 0,
+            }
+        }
+    }
+
+    impl MockApi {
+        fn calls(&self) -> Vec<Call> {
+            self.calls.lock().unwrap().clone()
+        }
+        fn push(&self, c: Call) {
+            self.calls.lock().unwrap().push(c);
+        }
+        fn unavailable(&self, feature: Feature, function: &str) -> StreamlineError {
+            StreamlineError::FeatureFunctionUnavailable {
+                feature,
+                function: function.to_string(),
+                detail: "feature function not resolved (mock)".to_string(),
+            }
+        }
+    }
+
+    impl StreamlineApi for MockApi {
+        unsafe fn set_d3d_device(&self, _device: *mut c_void) -> SlResult {
+            self.push(Call::SetD3DDevice);
+            self.set_d3d_device_result
+        }
+
+        unsafe fn resolve_feature_functions(&self) -> Result<(), StreamlineError> {
+            self.push(Call::ResolveFeatureFunctions);
+            Ok(())
+        }
+
+        unsafe fn is_feature_supported(
+            &self,
+            feature: Feature,
+            _adapter_info: *const AdapterInfo,
+        ) -> SlResult {
+            self.push(Call::IsFeatureSupported(feature));
+            self.is_feature_supported_result
+        }
+
+        fn reflex_set_options(&self, mode: ReflexMode) -> Result<SlResult, StreamlineError> {
+            if self.features_unresolved {
+                return Err(self.unavailable(K_FEATURE_REFLEX, "slReflexSetOptions"));
+            }
+            self.push(Call::ReflexSetOptions(mode));
+            Ok(self.reflex_set_options_result)
+        }
+
+        unsafe fn dlssg_set_options(
+            &self,
+            _viewport: *const ViewportHandle,
+            options: *const DLSSGOptions,
+        ) -> Result<SlResult, StreamlineError> {
+            if self.features_unresolved {
+                return Err(self.unavailable(K_FEATURE_DLSS_G, "slDLSSGSetOptions"));
+            }
+            // SAFETY: the test keeps the `DLSSGOptions` alive across the call; we read only its plain
+            // (Copy) fields, never any pointer.
+            let o = unsafe { &*options };
+            self.push(Call::DlssgSetOptions {
+                mode: o.mode,
+                num_frames: o.num_frames_to_generate,
+                color_format: o.color_buffer_format,
+                ui_recomp: o.enable_user_interface_recomposition == Boolean::True,
+                ui_format: o.ui_buffer_format,
+            });
+            Ok(self.dlssg_set_options_result)
+        }
+
+        unsafe fn dlssg_get_state(
+            &self,
+            _viewport: *const ViewportHandle,
+            state: *mut DLSSGState,
+            options: *const DLSSGOptions,
+        ) -> Result<SlResult, StreamlineError> {
+            if self.features_unresolved {
+                return Err(self.unavailable(K_FEATURE_DLSS_G, "slDLSSGGetState"));
+            }
+            // SAFETY: the test keeps both structs alive; read the plain query mode, write the plain
+            // out-fields.
+            let query_mode = unsafe { (*options).mode };
+            self.push(Call::DlssgGetState { query_mode });
+            unsafe {
+                (*state).status = self.state_status;
+                (*state).num_frames_actually_presented = self.state_num_presented;
+            }
+            Ok(self.dlssg_get_state_result)
+        }
+
+        unsafe fn get_new_frame_token(&self, frame_index: u32) -> (SlResult, *mut FrameToken) {
+            self.push(Call::GetNewFrameToken(frame_index));
+            let token = if self.token_null {
+                core::ptr::null_mut()
+            } else {
+                dummy_token()
+            };
+            (self.get_new_frame_token_result, token)
+        }
+
+        unsafe fn reflex_sleep(&self, _token: *mut FrameToken) {
+            self.push(Call::ReflexSleep);
+        }
+
+        unsafe fn set_marker(&self, marker: PCLMarker, _token: *mut FrameToken) {
+            self.push(Call::SetMarker(marker));
+        }
+
+        unsafe fn set_constants(
+            &self,
+            values: *const Constants,
+            _frame: *const FrameToken,
+            _viewport: *const ViewportHandle,
+        ) -> SlResult {
+            // SAFETY: the test keeps the `Constants` alive across the call; read only the plain
+            // `reset` field.
+            let reset = unsafe { (*values).reset } == Boolean::True;
+            self.push(Call::SetConstants { reset });
+            self.set_constants_result
+        }
+
+        unsafe fn set_tag_for_frame(
+            &self,
+            _frame: *const FrameToken,
+            _viewport: *const ViewportHandle,
+            tags: *const ResourceTag,
+            num_tags: u32,
+            _cmd_buffer: *mut c_void,
+        ) -> SlResult {
+            // SAFETY: the test keeps the tag slice alive across the call; read only each plain
+            // `buffer_type` (never the dangling `resource` pointers).
+            let slice = unsafe { core::slice::from_raw_parts(tags, num_tags as usize) };
+            let buffer_types = slice.iter().map(|t| t.buffer_type).collect();
+            self.push(Call::SetTagForFrame { buffer_types });
+            self.set_tag_result
+        }
+
+        unsafe fn shutdown(&self) -> SlResult {
+            self.push(Call::Shutdown);
+            self.shutdown_result
+        }
+    }
+
+    /// A non-null opaque token sentinel — never dereferenced by the mock or the code under test.
+    fn dummy_token() -> *mut FrameToken {
+        core::ptr::NonNull::<FrameToken>::dangling().as_ptr()
+    }
+
+    /// A dummy command-list pointer — never dereferenced.
+    fn dummy_cmd_list() -> *mut c_void {
+        core::ptr::NonNull::<u8>::dangling().as_ptr().cast()
+    }
+
+    /// Build a `Vec<ResourceTag>` for the given buffer types (with null, never-deref'd resources),
+    /// for driving [`Frame::tag_core`] headlessly.
+    fn make_tags(buffer_types: &[BufferType]) -> Vec<ResourceTag> {
+        buffer_types
+            .iter()
+            .map(|&bt| {
+                ResourceTag::new(core::ptr::null_mut(), bt, ResourceLifecycle::ValidUntilPresent)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn begin_frame_emits_token_sleep_and_sim_markers_in_order() {
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 7).unwrap();
+        assert_eq!(frame.frame_index(), 7);
+        assert_eq!(frame.step.get(), Step::Begun);
+        assert!(!frame.presented.get());
+        assert_eq!(
+            mock.calls(),
+            vec![
+                Call::GetNewFrameToken(7),
+                Call::ReflexSleep,
+                Call::SetMarker(PCLMarker::SimulationStart),
+                Call::SetMarker(PCLMarker::SimulationEnd),
+            ]
+        );
+    }
+
+    #[test]
+    fn full_happy_path_emits_the_proven_call_sequence() {
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 3).unwrap();
+        frame.set_constants(&FgConstants::new()).unwrap();
+        frame.acquire_core();
+        let tags = make_tags(&[K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_MOTION_VECTORS]);
+        frame.tag_core(&tags, dummy_cmd_list()).unwrap();
+        frame.end_render();
+        frame.present_core(|| {});
+        assert!(frame.presented.get());
+        // The exact proven order AND completeness (length) of the per-frame Streamline call stream.
+        assert_eq!(
+            mock.calls(),
+            vec![
+                Call::GetNewFrameToken(3),
+                Call::ReflexSleep,
+                Call::SetMarker(PCLMarker::SimulationStart),
+                Call::SetMarker(PCLMarker::SimulationEnd),
+                Call::SetConstants { reset: false },
+                Call::SetMarker(PCLMarker::RenderSubmitStart),
+                Call::SetTagForFrame {
+                    buffer_types: vec![K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_MOTION_VECTORS],
+                },
+                Call::SetMarker(PCLMarker::RenderSubmitEnd),
+                Call::SetMarker(PCLMarker::PresentStart),
+                Call::SetMarker(PCLMarker::PresentEnd),
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_reset_is_forced_on_frame_zero() {
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 0).unwrap();
+        // FgConstants::new() has reset = false; frame 0 must force it true.
+        frame.set_constants(&FgConstants::new()).unwrap();
+        assert!(mock.calls().contains(&Call::SetConstants { reset: true }));
+    }
+
+    #[test]
+    fn reset_is_honored_after_frame_zero() {
+        // reset = false is passed through unchanged on a later frame.
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 5).unwrap();
+        let mut c = FgConstants::new();
+        c.reset = false;
+        frame.set_constants(&c).unwrap();
+        assert!(mock.calls().contains(&Call::SetConstants { reset: false }));
+
+        // reset = true is honored too.
+        let mock2 = MockApi::default();
+        let frame2 = begin_frame_with(&mock2, ViewportHandle::new(0), 5).unwrap();
+        let mut c2 = FgConstants::new();
+        c2.reset = true;
+        frame2.set_constants(&c2).unwrap();
+        assert!(mock2.calls().contains(&Call::SetConstants { reset: true }));
+    }
+
+    #[test]
+    fn tag_core_passes_buffer_types_in_proven_order() {
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 1).unwrap();
+        frame.set_constants(&FgConstants::new()).unwrap();
+        frame.acquire_core();
+        let order = [
+            K_BUFFER_TYPE_DEPTH,
+            K_BUFFER_TYPE_MOTION_VECTORS,
+            K_BUFFER_TYPE_HUD_LESS_COLOR,
+            K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
+        ];
+        frame.tag_core(&make_tags(&order), dummy_cmd_list()).unwrap();
+        assert!(mock.calls().contains(&Call::SetTagForFrame {
+            buffer_types: order.to_vec()
+        }));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "out of order")]
+    fn out_of_order_step_panics_in_debug() {
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 1).unwrap();
+        // The frame is at `Begun`; `end_render` expects `Tagged` — the debug_assert! fires.
+        frame.end_render();
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn out_of_order_step_is_flagged_in_release() {
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 1).unwrap();
+        // In a release build the debug_assert! is compiled out, but the mis-order flag still flips.
+        frame.end_render();
+        assert!(frame.misordered.get());
+    }
+
+    #[test]
+    fn correctly_ordered_frame_is_not_flagged() {
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 2).unwrap();
+        frame.set_constants(&FgConstants::new()).unwrap();
+        frame.acquire_core();
+        frame
+            .tag_core(&make_tags(&[K_BUFFER_TYPE_DEPTH]), dummy_cmd_list())
+            .unwrap();
+        frame.end_render();
+        frame.present_core(|| {});
+        assert!(!frame.misordered.get());
+        assert!(frame.presented.get());
+    }
+
+    #[test]
+    fn unpresented_frame_reads_as_aborted_before_drop() {
+        // Drop logs an abort when `presented` is false; assert the observable signals it reads.
+        let mock = MockApi::default();
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 1).unwrap();
+        frame.set_constants(&FgConstants::new()).unwrap();
+        assert!(!frame.presented.get());
+        assert_eq!(frame.step.get(), Step::Constants);
+    }
+
+    #[test]
+    fn get_new_frame_token_error_propagates() {
+        let mock = MockApi {
+            get_new_frame_token_result: SlResult::ErrorDeviceNotCreated,
+            ..Default::default()
+        };
+        // `Frame` is not `Debug`, so match the `Result` directly rather than `unwrap_err()`.
+        let result = begin_frame_with(&mock, ViewportHandle::new(0), 0);
+        assert!(matches!(
+            result,
+            Err(StreamlineError::SlCall {
+                result: SlResult::ErrorDeviceNotCreated,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn null_frame_token_is_reported() {
+        let mock = MockApi {
+            token_null: true,
+            ..Default::default()
+        };
+        let result = begin_frame_with(&mock, ViewportHandle::new(0), 0);
+        assert!(matches!(
+            result,
+            Err(StreamlineError::FeatureFunctionUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn set_constants_error_propagates() {
+        let mock = MockApi {
+            set_constants_result: SlResult::ErrorMissingConstants,
+            ..Default::default()
+        };
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 5).unwrap();
+        let err = frame.set_constants(&FgConstants::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            StreamlineError::SlCall {
+                result: SlResult::ErrorMissingConstants,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tag_core_error_propagates() {
+        let mock = MockApi {
+            set_tag_result: SlResult::ErrorMissingResourceState,
+            ..Default::default()
+        };
+        let frame = begin_frame_with(&mock, ViewportHandle::new(0), 1).unwrap();
+        frame.set_constants(&FgConstants::new()).unwrap();
+        frame.acquire_core();
+        let err = frame
+            .tag_core(&make_tags(&[K_BUFFER_TYPE_DEPTH]), dummy_cmd_list())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StreamlineError::SlCall {
+                result: SlResult::ErrorMissingResourceState,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn query_state_decodes_status_and_uses_given_mode() {
+        let mock = MockApi {
+            state_status: dlssg_status::OK,
+            state_num_presented: 2,
+            ..Default::default()
+        };
+        let st = query_state_with(&mock, &ViewportHandle::new(0), DLSSGMode::On, 1).unwrap();
+        assert!(st.is_ok);
+        assert_eq!(st.num_frames_actually_presented, 2);
+        assert_eq!(st.status_text, "eOk");
+        // The query was built with the mode we passed (the "last-enabled mode" in production).
+        assert!(mock.calls().contains(&Call::DlssgGetState {
+            query_mode: DLSSGMode::On
+        }));
+    }
+
+    #[test]
+    fn query_state_reports_failure_status() {
+        let mock = MockApi {
+            state_status: dlssg_status::FAIL_GET_CURRENT_BACK_BUFFER_INDEX_NOT_CALLED,
+            ..Default::default()
+        };
+        let st = query_state_with(&mock, &ViewportHandle::new(0), DLSSGMode::On, 1).unwrap();
+        assert!(!st.is_ok);
+        assert!(st.status_text.contains("eFailGetCurrentBackBufferIndexNotCalled"));
+    }
+
+    #[test]
+    fn query_state_error_propagates() {
+        let mock = MockApi {
+            dlssg_get_state_result: SlResult::ErrorNotInitialized,
+            ..Default::default()
+        };
+        let err = query_state_with(&mock, &ViewportHandle::new(0), DLSSGMode::On, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            StreamlineError::SlCall {
+                result: SlResult::ErrorNotInitialized,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn apply_dlssg_options_maps_options_through() {
+        let mock = MockApi::default();
+        let opts = FrameGenerationOptions::enabled();
+        apply_dlssg_options(&mock, &ViewportHandle::new(0), &opts, 87).unwrap();
+        assert!(mock.calls().contains(&Call::DlssgSetOptions {
+            mode: DLSSGMode::On,
+            num_frames: 1,
+            color_format: 87,
+            ui_recomp: false,
+            ui_format: 0,
+        }));
+    }
+
+    #[test]
+    fn apply_dlssg_options_enables_ui_recomposition() {
+        let mock = MockApi::default();
+        // with_ui_recomposition(R8Unorm) -> ui_format = dxgi_format_of(R8Unorm) = 61.
+        let opts =
+            FrameGenerationOptions::enabled().with_ui_recomposition(wgpu::TextureFormat::R8Unorm);
+        apply_dlssg_options(&mock, &ViewportHandle::new(0), &opts, 0).unwrap();
+        assert!(mock.calls().contains(&Call::DlssgSetOptions {
+            mode: DLSSGMode::On,
+            num_frames: 1,
+            color_format: 0,
+            ui_recomp: true,
+            ui_format: 61,
+        }));
+    }
+
+    #[test]
+    fn apply_dlssg_options_unresolved_feature_is_reported() {
+        let mock = MockApi {
+            features_unresolved: true,
+            ..Default::default()
+        };
+        let err = apply_dlssg_options(
+            &mock,
+            &ViewportHandle::new(0),
+            &FrameGenerationOptions::enabled(),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StreamlineError::FeatureFunctionUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn apply_dlssg_options_call_error_propagates() {
+        let mock = MockApi {
+            dlssg_set_options_result: SlResult::ErrorFeatureNotSupported,
+            ..Default::default()
+        };
+        let err = apply_dlssg_options(
+            &mock,
+            &ViewportHandle::new(0),
+            &FrameGenerationOptions::enabled(),
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            StreamlineError::SlCall {
+                result: SlResult::ErrorFeatureNotSupported,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reflex_set_options_records_the_mode() {
+        let mock = MockApi::default();
+        let r = mock.reflex_set_options(ReflexMode::LowLatency).unwrap();
+        assert!(r.is_ok());
+        assert!(mock
+            .calls()
+            .contains(&Call::ReflexSetOptions(ReflexMode::LowLatency)));
     }
 }
