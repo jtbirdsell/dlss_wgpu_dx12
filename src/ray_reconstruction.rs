@@ -339,7 +339,8 @@ impl DlssRayReconstructionContext {
 impl Drop for DlssRayReconstructionContext {
     fn drop(&mut self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        let _sdk = self.sdk.lock().unwrap();
+        // Poison-tolerant: never double-panic across FFI in Drop (see DlssContext::drop).
+        let _sdk = self.sdk.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             if let Err(e) = check_ngx_result(NVSDK_NGX_D3D12_ReleaseFeature(self.feature)) {
                 log::error!("Failed to release DlssRayReconstructionContext feature: {e}");

@@ -31,8 +31,11 @@ impl DlssPerfQualityMode {
     ) -> NVSDK_NGX_PerfQuality_Value {
         match self {
             Self::Auto => {
-                let mega_pixels =
-                    (upscaled_resolution.x * upscaled_resolution.y) as f32 / 1_000_000.0;
+                // Multiply in u64 before the f32 cast so a pathological resolution cannot overflow
+                // u32 (debug panic / wrong tier in release); the product fits f32 fine afterwards.
+                let mega_pixels = (upscaled_resolution.x as u64 * upscaled_resolution.y as u64)
+                    as f32
+                    / 1_000_000.0;
 
                 if mega_pixels < 2.03 {
                     NVSDK_NGX_PerfQuality_Value_NVSDK_NGX_PerfQuality_Value_DLAA

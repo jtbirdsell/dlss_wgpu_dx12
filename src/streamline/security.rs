@@ -367,9 +367,12 @@ fn extract_subject_from_handles(
     }
 
     // The signer info's Issuer + SerialNumber identify the signing certificate within the store.
-    // SAFETY: `buffer` holds a valid CMSG_SIGNER_INFO laid out by the crypto API; reading the
-    // header fields by reference does not outlive `buffer`.
-    let signer_info = unsafe { &*(buffer.as_ptr() as *const CMSG_SIGNER_INFO) };
+    // SAFETY: `buffer` holds a CMSG_SIGNER_INFO laid out by the crypto API, but the `Vec<u8>` backing
+    // is only 1-byte aligned while CMSG_SIGNER_INFO is pointer-aligned — so we COPY the header out
+    // with `read_unaligned` rather than forming a reference to a possibly-misaligned address (which
+    // is UB even if the later field reads happen to work). The copied Issuer/SerialNumber blobs'
+    // `pbData` pointers still point into `buffer`, which outlives the find call below.
+    let signer_info = unsafe { core::ptr::read_unaligned(buffer.as_ptr() as *const CMSG_SIGNER_INFO) };
 
     // 3. Build a CERT_INFO carrying only Issuer + SerialNumber, as CERT_FIND_SUBJECT_CERT expects.
     let mut find_info = CERT_INFO {
