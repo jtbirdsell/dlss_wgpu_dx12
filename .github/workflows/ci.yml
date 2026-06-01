@@ -25,15 +25,10 @@ jobs:
       - name: Install LLVM (libclang, for bindgen)
         run: choco install llvm --no-progress -y
 
-      # The crate depends on a patched wgpu as a SIBLING directory (../wgpu): the patch adds the
-      # dx12 CommandEncoder::raw_command_list accessor (gfx-rs/wgpu#8888). Vendor it here.
-      # NOTE: if the committed patch fails to apply (CRLF/line-ending drift), regenerate it from
-      # the v29.0.3 tag — see patches/README and docs/SETUP.md.
-      - name: Vendor patched wgpu (gfx-rs/wgpu#8888)
-        shell: pwsh
-        run: |
-          git clone --depth 1 --branch v29.0.3 https://github.com/gfx-rs/wgpu.git "$env:GITHUB_WORKSPACE\..\wgpu"
-          git -C "$env:GITHUB_WORKSPACE\..\wgpu" apply --whitespace=nowarn "$env:GITHUB_WORKSPACE\patches\wgpu-29.0.3-dx12-raw-command-list.patch"
+      # wgpu is resolved straight from the pinned jtbirdsell/wgpu fork (rev d81d755) by Cargo.toml —
+      # it already carries the dx12 raw_command_list accessor (gfx-rs/wgpu#8888) and the Streamline
+      # factory-upgrade. There is no [patch]/path override, so the cargo steps below fetch and build
+      # the exact wgpu a consumer pins; no local ../wgpu checkout is needed.
 
       # The NGX headers + import libs come from a clone of NVIDIA/DLSS (uses git-lfs for the libs).
       - name: Clone DLSS SDK

@@ -42,7 +42,7 @@ runtime DLLs under `lib/Windows_x86_64/`).
 With `DLSS_SDK` and (if needed) `LIBCLANG_PATH` set, `cargo build` should now configure bindgen and
 link NGX.
 
-## 3. Apply the vendored wgpu patch (gfx-rs/wgpu#8888)
+## 3. Depend on the patched wgpu (gfx-rs/wgpu#8888)
 
 This crate needs an accessor that stock wgpu does not yet expose: a dx12
 `CommandEncoder::raw_command_list` accessor on wgpu-hal (tracked as
@@ -54,23 +54,45 @@ Until the patch lands upstream, **every consumer of this crate must build agains
 wgpu**, because the patch changes wgpu-hal's public surface and Cargo requires a single resolved
 version of wgpu / wgpu-hal across the dependency graph.
 
-Point your workspace at a patched copy of wgpu in one of two ways:
+Point your workspace at the same patched wgpu. The first option is what this crate's own
+`Cargo.toml` uses and is the simplest:
 
-- **Path dependency** — depend on the patched checkout directly:
+- **Fork-direct (recommended)** — depend on the pre-patched fork by git `rev`. The fork already
+  carries *both* additive patches (the accessor *and* the Streamline factory-upgrade from §5.1), so
+  there is nothing to clone or apply yourself:
+
+  ```toml
+  [dependencies]
+  wgpu = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38", default-features = false, features = ["dx12"] }
+  ```
+
+  If you also pull in `wgpu` transitively through other crates, redirect those to the same fork/rev
+  so the graph resolves to one wgpu:
+
+  ```toml
+  [patch.crates-io]
+  wgpu     = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38" }
+  wgpu-hal = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38" }
+  ```
+
+- **Local checkout** — if you maintain your own wgpu clone, clone `gfx-rs/wgpu` at the `v29.0.3`
+  tag, apply `patches/wgpu-29.0.3-dx12-raw-command-list.patch` from this repo, and depend on it by
+  path (directly or via `[patch.crates-io]` with `path = ...`):
 
   ```toml
   [dependencies]
   wgpu = { path = "C:/Users/<you>/wgpu/wgpu", default-features = false, features = ["dx12"] }
   ```
 
-- **`[patch.crates-io]`** — keep a normal `wgpu` dependency but redirect it (and wgpu-hal) to the
-  patched checkout:
-
   ```toml
   [patch.crates-io]
-  wgpu = { path = "C:/Users/<you>/wgpu/wgpu" }
+  wgpu     = { path = "C:/Users/<you>/wgpu/wgpu" }
   wgpu-hal = { path = "C:/Users/<you>/wgpu/wgpu-hal" }
   ```
+
+  Note: the committed patch contains only the `raw_command_list` accessor (SR/RR). The Streamline
+  factory-upgrade that **Frame Generation** needs lives only in the fork (§5.1), so a local checkout
+  is sufficient for SR/RR but not for FG — for FG, use the fork-direct option above.
 
 This crate currently targets **wgpu 29.0.x**. Your patched checkout must be that same version so
 the `windows` COM interface types stay ABI-compatible (this crate pins `windows` to the same major
