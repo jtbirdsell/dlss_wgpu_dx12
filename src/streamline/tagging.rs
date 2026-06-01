@@ -95,19 +95,58 @@ impl<'a> FgResources<'a> {
     /// The `(FgResource, sl::BufferType)` pairs to tag this frame, in the spike's proven order:
     /// depth, motion vectors, then (if present) HUD-less color and UI.
     pub(crate) fn tags(&self) -> Vec<(FgResource<'a>, BufferType)> {
-        let mut out = Vec::with_capacity(4);
-        out.push((self.depth, K_BUFFER_TYPE_DEPTH));
-        out.push((self.motion_vectors, K_BUFFER_TYPE_MOTION_VECTORS));
+        // Gather the tagged resources in the proven order (depth, motion vectors, optional HUD-less,
+        // optional UI), then zip them against [`tag_buffer_types`] — the pure ordering helper — so
+        // the type order has a single source of truth that is unit-tested without a device.
+        let mut resources: Vec<FgResource<'a>> = vec![self.depth, self.motion_vectors];
         if let Some(hudless) = self.hudless_color {
-            out.push((hudless, K_BUFFER_TYPE_HUD_LESS_COLOR));
+            resources.push(hudless);
         }
         match &self.ui {
-            Some(FgUi::ColorAndAlpha(r)) => out.push((*r, K_BUFFER_TYPE_UI_COLOR_AND_ALPHA)),
-            Some(FgUi::Alpha(r)) => out.push((*r, K_BUFFER_TYPE_UI_ALPHA)),
+            Some(FgUi::ColorAndAlpha(r)) | Some(FgUi::Alpha(r)) => resources.push(*r),
             None => {}
         }
-        out
+        let types = tag_buffer_types(
+            self.hudless_color.is_some(),
+            self.ui.as_ref().map(UiTagKind::of),
+        );
+        resources.into_iter().zip(types).collect()
     }
+}
+
+/// Which UI buffer type a tagged [`FgUi`] layer maps to. Lets the pure [`tag_buffer_types`] ordering
+/// helper stay independent of the `wgpu`-bearing [`FgUi`] so it can be unit-tested without a device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UiTagKind {
+    ColorAndAlpha,
+    Alpha,
+}
+
+impl UiTagKind {
+    fn of(ui: &FgUi<'_>) -> Self {
+        match ui {
+            FgUi::ColorAndAlpha(_) => UiTagKind::ColorAndAlpha,
+            FgUi::Alpha(_) => UiTagKind::Alpha,
+        }
+    }
+}
+
+/// The `sl::BufferType`s to tag this frame, in the spike's proven order: depth, motion vectors, then
+/// (if present) HUD-less color and the UI layer. Pure (no `wgpu`), so it is unit-tested directly;
+/// [`FgResources::tags`] zips its resources against this exact order.
+pub(crate) fn tag_buffer_types(has_hudless: bool, ui: Option<UiTagKind>) -> Vec<BufferType> {
+    let mut out = Vec::with_capacity(4);
+    out.push(K_BUFFER_TYPE_DEPTH);
+    out.push(K_BUFFER_TYPE_MOTION_VECTORS);
+    if has_hudless {
+        out.push(K_BUFFER_TYPE_HUD_LESS_COLOR);
+    }
+    match ui {
+        Some(UiTagKind::ColorAndAlpha) => out.push(K_BUFFER_TYPE_UI_COLOR_AND_ALPHA),
+        Some(UiTagKind::Alpha) => out.push(K_BUFFER_TYPE_UI_ALPHA),
+        None => {}
+    }
+    out
 }
 
 /// Per-frame common constants handed to DLSS Frame Generation via `slSetConstants`.
@@ -349,7 +388,12 @@ pub(crate) fn dxgi_format_of(format: wgpu::TextureFormat) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::FgConstants;
+    use super::super::types::Boolean;
+    use super::{
+        dxgi_format_of, tag_buffer_types, FgConstants, UiTagKind, K_BUFFER_TYPE_DEPTH,
+        K_BUFFER_TYPE_HUD_LESS_COLOR, K_BUFFER_TYPE_MOTION_VECTORS, K_BUFFER_TYPE_UI_ALPHA,
+        K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
+    };
     use glam::{UVec2, Vec2};
 
     fn approx(a: Vec2, b: Vec2) {
@@ -388,5 +432,108 @@ mod tests {
         let c = FgConstants::derive(None, Vec2::ZERO, false, UVec2::new(1920, 1080));
         approx(c.mvec_scale, Vec2::new(1.0 / 1920.0, 1.0 / 1080.0));
         assert!(!c.reset);
+    }
+
+    #[test]
+    fn dxgi_format_of_maps_known_formats() {
+        use wgpu::TextureFormat as F;
+        // Color / swapchain, depth, motion-vector, and UI formats an FG integration realistically
+        // tags — the exact DXGI_FORMAT numbers SL keys off.
+        assert_eq!(dxgi_format_of(F::Bgra8Unorm), 87);
+        assert_eq!(dxgi_format_of(F::Bgra8UnormSrgb), 91);
+        assert_eq!(dxgi_format_of(F::Rgba8Unorm), 28);
+        assert_eq!(dxgi_format_of(F::Rgba8UnormSrgb), 29);
+        assert_eq!(dxgi_format_of(F::Rgba16Float), 10);
+        assert_eq!(dxgi_format_of(F::Rgb10a2Unorm), 24);
+        assert_eq!(dxgi_format_of(F::R32Float), 41);
+        assert_eq!(dxgi_format_of(F::Depth32Float), 40);
+        assert_eq!(dxgi_format_of(F::Depth24Plus), 45);
+        assert_eq!(dxgi_format_of(F::Depth24PlusStencil8), 45);
+        assert_eq!(dxgi_format_of(F::Rg16Float), 34);
+        assert_eq!(dxgi_format_of(F::Rg32Float), 16);
+        assert_eq!(dxgi_format_of(F::R8Unorm), 61);
+        assert_eq!(dxgi_format_of(F::R16Float), 54);
+    }
+
+    #[test]
+    fn dxgi_format_of_unmapped_is_unknown_zero() {
+        // An unmapped format falls back to DXGI_FORMAT_UNKNOWN (0), which SL tolerates.
+        assert_eq!(dxgi_format_of(wgpu::TextureFormat::Rgba32Float), 0);
+    }
+
+    #[test]
+    fn tag_buffer_types_orders_depth_mvec_then_optionals() {
+        assert_eq!(
+            tag_buffer_types(false, None),
+            vec![K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_MOTION_VECTORS]
+        );
+        assert_eq!(
+            tag_buffer_types(true, None),
+            vec![
+                K_BUFFER_TYPE_DEPTH,
+                K_BUFFER_TYPE_MOTION_VECTORS,
+                K_BUFFER_TYPE_HUD_LESS_COLOR,
+            ]
+        );
+        assert_eq!(
+            tag_buffer_types(true, Some(UiTagKind::ColorAndAlpha)),
+            vec![
+                K_BUFFER_TYPE_DEPTH,
+                K_BUFFER_TYPE_MOTION_VECTORS,
+                K_BUFFER_TYPE_HUD_LESS_COLOR,
+                K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
+            ]
+        );
+        assert_eq!(
+            tag_buffer_types(true, Some(UiTagKind::Alpha)),
+            vec![
+                K_BUFFER_TYPE_DEPTH,
+                K_BUFFER_TYPE_MOTION_VECTORS,
+                K_BUFFER_TYPE_HUD_LESS_COLOR,
+                K_BUFFER_TYPE_UI_ALPHA,
+            ]
+        );
+        // The two optionals are independent: UI present without HUD-less.
+        assert_eq!(
+            tag_buffer_types(false, Some(UiTagKind::Alpha)),
+            vec![
+                K_BUFFER_TYPE_DEPTH,
+                K_BUFFER_TYPE_MOTION_VECTORS,
+                K_BUFFER_TYPE_UI_ALPHA,
+            ]
+        );
+    }
+
+    #[test]
+    fn to_sl_translates_booleans_and_copies_scales() {
+        // Pin the hand-copied FgConstants -> sl::Constants translation (the silent-corruption class
+        // the module warns about): bool -> sl::Boolean and the mvec/jitter scale copy.
+        let mut c = FgConstants::new();
+        c.reset = true;
+        c.depth_inverted = true;
+        c.camera_motion_included = false;
+        c.mvec_scale = Vec2::new(0.5, 0.25);
+        c.jitter_offset = Vec2::new(0.125, 0.0625);
+        let sl = c.to_sl();
+        assert_eq!(sl.reset, Boolean::True);
+        assert_eq!(sl.depth_inverted, Boolean::True);
+        assert_eq!(sl.camera_motion_included, Boolean::False);
+        approx(
+            Vec2::new(sl.mvec_scale.x, sl.mvec_scale.y),
+            Vec2::new(0.5, 0.25),
+        );
+        approx(
+            Vec2::new(sl.jitter_offset.x, sl.jitter_offset.y),
+            Vec2::new(0.125, 0.0625),
+        );
+    }
+
+    #[test]
+    fn new_has_proven_defaults() {
+        let c = FgConstants::new();
+        approx(c.mvec_scale, Vec2::ONE);
+        assert!(!c.reset);
+        assert!(c.camera_motion_included);
+        assert!(!c.depth_inverted);
     }
 }

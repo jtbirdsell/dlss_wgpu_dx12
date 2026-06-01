@@ -13,12 +13,14 @@
 //!     untrusted/unsigned binary is refused.
 //!   * Failures surface as the typed [`StreamlineError`] rather than `String`.
 
+use super::api::StreamlineApi;
 use super::security::verify_interposer_signature;
 use super::types::*;
 use core::ffi::c_void;
 use libloading::os::windows as ll;
 use std::ffi::CString;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// Environment variable that points at the Streamline SDK root.
 const STREAMLINE_SDK_ENV: &str = "STREAMLINE_SDK";
@@ -113,12 +115,20 @@ pub struct SlApi {
     pub sl_set_tag_for_frame: PfnSlSetTagForFrame,
     pub sl_get_feature_function: PfnSlGetFeatureFunction,
 
-    // Feature-level (resolved after slSetD3DDevice via slGetFeatureFunction)
-    pub sl_dlssg_set_options: Option<PfnSlDLSSGSetOptions>,
-    pub sl_dlssg_get_state: Option<PfnSlDLSSGGetState>,
-    pub sl_reflex_set_options: Option<PfnSlReflexSetOptions>,
-    pub sl_reflex_sleep: Option<PfnSlReflexSleep>,
-    pub sl_pcl_set_marker: Option<PfnSlPCLSetMarker>,
+    // Feature-level functions, resolved exactly once (after slSetD3DDevice) via slGetFeatureFunction.
+    // `OnceLock` gives interior mutability with `Send + Sync` and a set-once invariant, so the
+    // `StreamlineApi` trait can resolve them through `&self` (the trait is `&self` everywhere).
+    feature_fns: OnceLock<FeatureFns>,
+}
+
+/// The DLSS-G / Reflex / PCL feature functions, resolved together (all-or-nothing) via
+/// `slGetFeatureFunction` after `slSetD3DDevice`. Held behind a [`OnceLock`] in [`SlApi`].
+struct FeatureFns {
+    dlssg_set_options: PfnSlDLSSGSetOptions,
+    dlssg_get_state: PfnSlDLSSGGetState,
+    reflex_set_options: PfnSlReflexSetOptions,
+    reflex_sleep: PfnSlReflexSleep,
+    pcl_set_marker: PfnSlPCLSetMarker,
 }
 
 /// Resolve an exported symbol to a typed fn-pointer.
@@ -218,11 +228,7 @@ impl SlApi {
             sl_set_constants,
             sl_set_tag_for_frame,
             sl_get_feature_function,
-            sl_dlssg_set_options: None,
-            sl_dlssg_get_state: None,
-            sl_reflex_set_options: None,
-            sl_reflex_sleep: None,
-            sl_pcl_set_marker: None,
+            feature_fns: OnceLock::new(),
         })
     }
 
@@ -257,24 +263,159 @@ impl SlApi {
         Ok(unsafe { core::mem::transmute_copy::<*mut c_void, T>(&ptr) })
     }
 
-    /// Resolve all feature functions. MUST be called only after `slSetD3DDevice` succeeded.
-    ///
-    /// # Safety
-    /// Requires that `slSetD3DDevice` was already called successfully on this interposer; otherwise
-    /// `slGetFeatureFunction` has no device context to resolve against.
-    pub unsafe fn resolve_feature_functions(&mut self) -> Result<(), StreamlineError> {
+    /// The resolved feature functions, or [`StreamlineError::FeatureFunctionUnavailable`] (tagged
+    /// with `feature`/`function`) until [`StreamlineApi::resolve_feature_functions`] has run. Used by
+    /// the trait impl's feature-level methods to map "not resolved" to the typed error.
+    fn resolved_feature_fns(
+        &self,
+        feature: Feature,
+        function: &str,
+    ) -> Result<&FeatureFns, StreamlineError> {
+        self.feature_fns
+            .get()
+            .ok_or_else(|| StreamlineError::FeatureFunctionUnavailable {
+                feature,
+                function: function.to_string(),
+                detail: "feature function not resolved (resolve_feature_functions not called)"
+                    .to_string(),
+            })
+    }
+}
+
+/// The production [`StreamlineApi`]: each method forwards to the resolved interposer fn-pointer.
+/// The best-effort Reflex/PCL methods (`reflex_sleep`/`set_marker`) log-and-swallow a non-Ok result
+/// exactly as the old `reflex` helpers did, so a dropped latency signal never aborts a frame.
+impl StreamlineApi for SlApi {
+    unsafe fn set_d3d_device(&self, device: *mut c_void) -> SlResult {
+        // SAFETY: `device` is a live ID3D12Device* per the caller's contract; `sl_set_d3d_device`
+        // is the resolved core export.
+        unsafe { (self.sl_set_d3d_device)(device) }
+    }
+
+    unsafe fn resolve_feature_functions(&self) -> Result<(), StreamlineError> {
         // SAFETY: each `feature_fn::<Pfn*>` uses a fn type matching the named feature function's
         // C++ ABI, and we are (by this fn's contract) past `slSetD3DDevice`.
-        self.sl_dlssg_set_options =
-            Some(unsafe { self.feature_fn(K_FEATURE_DLSS_G, "slDLSSGSetOptions")? });
-        self.sl_dlssg_get_state =
-            Some(unsafe { self.feature_fn(K_FEATURE_DLSS_G, "slDLSSGGetState")? });
-        self.sl_reflex_set_options =
-            Some(unsafe { self.feature_fn(K_FEATURE_REFLEX, "slReflexSetOptions")? });
-        self.sl_reflex_sleep = Some(unsafe { self.feature_fn(K_FEATURE_REFLEX, "slReflexSleep")? });
-        // PCL marker function lives in the PCL feature (kFeaturePCL). The header name is
-        // `slPCLSetMarker` (there is no `slReflexSetMarker` in 2.11.1 — marker setting moved to PCL).
-        self.sl_pcl_set_marker = Some(unsafe { self.feature_fn(K_FEATURE_PCL, "slPCLSetMarker")? });
+        let fns = FeatureFns {
+            dlssg_set_options: unsafe { self.feature_fn(K_FEATURE_DLSS_G, "slDLSSGSetOptions")? },
+            dlssg_get_state: unsafe { self.feature_fn(K_FEATURE_DLSS_G, "slDLSSGGetState")? },
+            reflex_set_options: unsafe { self.feature_fn(K_FEATURE_REFLEX, "slReflexSetOptions")? },
+            reflex_sleep: unsafe { self.feature_fn(K_FEATURE_REFLEX, "slReflexSleep")? },
+            // PCL marker function lives in the PCL feature (kFeaturePCL). The header name is
+            // `slPCLSetMarker` (there is no `slReflexSetMarker` in 2.11.1 — marker setting moved to
+            // PCL).
+            pcl_set_marker: unsafe { self.feature_fn(K_FEATURE_PCL, "slPCLSetMarker")? },
+        };
+        // Resolution runs exactly once during context setup; a second call is a no-op.
+        let _ = self.feature_fns.set(fns);
         Ok(())
+    }
+
+    unsafe fn is_feature_supported(
+        &self,
+        feature: Feature,
+        adapter_info: *const AdapterInfo,
+    ) -> SlResult {
+        // SAFETY: `adapter_info` is a live `sl::AdapterInfo` per the caller's contract;
+        // `sl_is_feature_supported` is the resolved core export.
+        unsafe { (self.sl_is_feature_supported)(feature, adapter_info) }
+    }
+
+    fn reflex_set_options(&self, mode: ReflexMode) -> Result<SlResult, StreamlineError> {
+        let set = self
+            .resolved_feature_fns(K_FEATURE_REFLEX, "slReflexSetOptions")?
+            .reflex_set_options;
+        let opts = ReflexOptions::new(mode);
+        // SAFETY: `opts` is a fully-initialized `sl::ReflexOptions` living on the stack through the
+        // call; `set` is the resolved Reflex feature fn.
+        Ok(unsafe { set(&opts) })
+    }
+
+    unsafe fn dlssg_set_options(
+        &self,
+        viewport: *const ViewportHandle,
+        options: *const DLSSGOptions,
+    ) -> Result<SlResult, StreamlineError> {
+        let set = self
+            .resolved_feature_fns(K_FEATURE_DLSS_G, "slDLSSGSetOptions")?
+            .dlssg_set_options;
+        // SAFETY: `viewport`/`options` are live per the caller's contract; `set` is the resolved
+        // DLSS-G feature fn.
+        Ok(unsafe { set(viewport, options) })
+    }
+
+    unsafe fn dlssg_get_state(
+        &self,
+        viewport: *const ViewportHandle,
+        state: *mut DLSSGState,
+        options: *const DLSSGOptions,
+    ) -> Result<SlResult, StreamlineError> {
+        let get = self
+            .resolved_feature_fns(K_FEATURE_DLSS_G, "slDLSSGGetState")?
+            .dlssg_get_state;
+        // SAFETY: in/out params are live per the caller's contract; `get` is the resolved DLSS-G
+        // feature fn.
+        Ok(unsafe { get(viewport, state, options) })
+    }
+
+    unsafe fn get_new_frame_token(&self, frame_index: u32) -> (SlResult, *mut FrameToken) {
+        let mut token: *mut FrameToken = core::ptr::null_mut();
+        // SAFETY: `&frame_index` is a valid `*const u32` in-param; `&mut token` is a valid out-param;
+        // `sl_get_new_frame_token` is the resolved core export.
+        let r = unsafe { (self.sl_get_new_frame_token)(&mut token, &frame_index) };
+        (r, token)
+    }
+
+    unsafe fn reflex_sleep(&self, token: *mut FrameToken) {
+        // Best-effort: a missing feature function or non-Ok result is logged and swallowed.
+        if let Some(fns) = self.feature_fns.get() {
+            // SAFETY: `token` is this frame's live token per the caller's contract; `reflex_sleep`
+            // is the resolved Reflex feature fn.
+            let r = unsafe { (fns.reflex_sleep)(token) };
+            if !r.is_ok() {
+                log::debug!("slReflexSleep returned {r:?}");
+            }
+        }
+    }
+
+    unsafe fn set_marker(&self, marker: PCLMarker, token: *mut FrameToken) {
+        // Best-effort: a missing feature function or non-Ok result is logged and swallowed.
+        if let Some(fns) = self.feature_fns.get() {
+            // SAFETY: `token` is this frame's live token per the caller's contract; `pcl_set_marker`
+            // is the resolved PCL feature fn; `marker` is a valid `#[repr(u32)]` enum value.
+            let r = unsafe { (fns.pcl_set_marker)(marker, token) };
+            if !r.is_ok() {
+                log::trace!("slPCLSetMarker({marker:?}) returned {r:?}");
+            }
+        }
+    }
+
+    unsafe fn set_constants(
+        &self,
+        values: *const Constants,
+        frame: *const FrameToken,
+        viewport: *const ViewportHandle,
+    ) -> SlResult {
+        // SAFETY: all three pointers are live per the caller's contract; `sl_set_constants` is the
+        // resolved core export.
+        unsafe { (self.sl_set_constants)(values, frame, viewport) }
+    }
+
+    unsafe fn set_tag_for_frame(
+        &self,
+        frame: *const FrameToken,
+        viewport: *const ViewportHandle,
+        tags: *const ResourceTag,
+        num_tags: u32,
+        cmd_buffer: *mut c_void,
+    ) -> SlResult {
+        // SAFETY: `frame`/`viewport`/`tags` are live per the caller's contract; `cmd_buffer` is a
+        // live open command list; `sl_set_tag_for_frame` is the resolved core export.
+        unsafe { (self.sl_set_tag_for_frame)(frame, viewport, tags, num_tags, cmd_buffer) }
+    }
+
+    unsafe fn shutdown(&self) -> SlResult {
+        // SAFETY: slInit succeeded and shutdown is called once per the caller's contract;
+        // `sl_shutdown` is the resolved core export.
+        unsafe { (self.sl_shutdown)() }
     }
 }

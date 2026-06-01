@@ -375,7 +375,7 @@ pub enum Boolean {
 
 /// `sl::DLSSGMode : uint32_t` (sl_dlss_g.h).
 #[repr(u32)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DLSSGMode {
     Off = 0,
     On = 1,
@@ -434,7 +434,7 @@ pub mod dlssg_status {
 
 /// `sl::ReflexMode` (plain C enum, 4 bytes) (sl_reflex.h).
 #[repr(u32)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflexMode {
     Off = 0,
     LowLatency = 1,
@@ -443,7 +443,7 @@ pub enum ReflexMode {
 
 /// `sl::PCLMarker : uint32_t` (sl_pcl.h).
 #[repr(u32)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PCLMarker {
     SimulationStart = 0,
     SimulationEnd = 1,

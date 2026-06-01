@@ -66,13 +66,30 @@ jobs:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: cargo clippy --all-targets --features frame-generation -- -D warnings
 
-      # GitHub runners have no NVIDIA GPU, so DLSS cannot be executed here — only build/link the
-      # tests and examples (which links the NGX lib + system libs and validates bindgen output).
-      - name: Build tests + examples (do not run; no NVIDIA GPU on CI)
+      # Run the headless unit tests. The mock-based Frame-Generation tests never load the interposer,
+      # create a wgpu device, or touch a GPU, so they run on a GPU-less CI runner — they need only the
+      # same DLSS_SDK (NGX headers/libs for bindgen) + LIBCLANG_PATH the build steps use, and NO
+      # STREAMLINE_SDK. The hardware tests in tests/headless.rs are #[ignore]d and stay skipped (no
+      # --ignored flag).
+      - name: Run headless tests (SR/RR + Frame Generation)
         shell: pwsh
         env:
           DLSS_SDK: ${{ runner.temp }}\dlss_sdk
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: |
-          cargo test --no-run --features ray-reconstruction
+          cargo test --features ray-reconstruction
+          cargo test --features frame-generation
+          # Re-run the FG suite in release so the order-enforcement tests prove they do not depend on
+          # debug_assert! (which is compiled out of release builds).
+          cargo test --features frame-generation --release
+
+      # GitHub runners have no NVIDIA GPU, so the examples are only built/linked here, never run
+      # (this links the NGX lib + system libs and validates the bindgen output).
+      - name: Build examples (do not run; no NVIDIA GPU on CI)
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
           cargo build --examples --features ray-reconstruction
+          cargo build --examples --features frame-generation

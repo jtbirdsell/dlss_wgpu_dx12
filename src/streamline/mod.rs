@@ -24,11 +24,15 @@ pub(crate) mod security;
 pub(crate) mod types;
 
 // FG core (this phase): the safe wrapper around the proven DLSS-G flow.
-//   * `reflex`    — internal Reflex + PCL marker helpers (DLSS-G dependencies).
+//   * `api`       — the StreamlineApi trait seam over the sl* calls (testability boundary).
 //   * `tagging`   — public per-frame input types: FgResources / FgResource / FgConstants.
 //   * `frame_gen` — the Streamline handle + FrameGenerationContext + per-frame Frame driver.
+//
+// The Reflex + PCL marker helpers that used to live in a `reflex` module are now methods on the
+// `StreamlineApi` trait (folded into `SlApi`'s impl), so the per-frame marker cadence is exercised
+// through the same seam the mock implements.
+pub(crate) mod api;
 mod frame_gen;
-mod reflex;
 mod tagging;
 
 // Re-export the public surface for the crate root to `pub use`.
