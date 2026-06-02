@@ -15,8 +15,10 @@
 //! them — the exe directory (searched first) and the interposer's own dir (`sl.common`, `sl.dlss_g`,
 //! `sl.reflex`, `sl.pcl`, `nvngx_dlssg`). This does NOT fully close the DLL-hijack surface: the
 //! interposer must locate its plugins via the DEFAULT search order (constraining it makes `slInit`
-//! fail with `eErrorNoPlugins`), so an attacker-renamed/unknown DLL on the search path — or the
-//! `dxgi.dll`/`d3d12.dll` loader-shims beside the exe — is NOT covered. Deployments MUST keep
+//! fail with `eErrorNoPlugins`), so an attacker-renamed/unknown DLL on the search path is NOT
+//! covered. (The `dxgi.dll`/`d3d12.dll` SL loader-shims are a separate matter: this crate uses the
+//! interposer PROXY path, not loader-shims, and now rejects a renamed-interposer `dxgi.dll`/`d3d12.dll`
+//! beside the exe at load time — a `LoaderShimConflict` error.) Deployments MUST keep
 //! `$STREAMLINE_SDK/bin/x64` and the exe directory on ACL-restricted storage writable only by an
 //! administrator. See [`ffi::SlApi::load`].
 //!

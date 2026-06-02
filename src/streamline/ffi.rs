@@ -19,7 +19,7 @@ use super::types::*;
 use core::ffi::c_void;
 use libloading::os::windows as ll;
 use std::ffi::{CString, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Environment variable that points at the Streamline SDK root.
@@ -53,9 +53,10 @@ const SIBLING_SL_PLUGINS: &[&str] = &[
 ///
 /// **Residual surface (NOT closed):** because the search order is (correctly) preserved, this covers
 /// only a KNOWN, ENUMERATED set in those two dirs — it cannot cover an attacker-renamed/unknown DLL
-/// the default search might still resolve, nor the `dxgi.dll`/`d3d12.dll` loader-shims staged beside
-/// the exe (those are the interposer itself, renamed). Those dirs MUST therefore be on ACL-restricted
-/// storage writable only by an administrator.
+/// the default search might still resolve. (The `dxgi.dll`/`d3d12.dll` loader-shims are handled
+/// separately: this crate uses the proxy path, not loader-shims, and rejects a renamed-interposer
+/// `dxgi.dll`/`d3d12.dll` beside the exe at load time — see [`reject_loader_shims`].) Those dirs MUST
+/// therefore be on ACL-restricted storage writable only by an administrator.
 fn verify_sibling_plugins(interposer_dir: &std::path::Path) -> Result<(), StreamlineError> {
     // Build the de-duplicated directory set: the exe dir (searched first / validated staging) then
     // the interposer's own dir. A failure to locate the exe dir is non-fatal (we still cover the
@@ -86,14 +87,75 @@ fn verify_sibling_plugins(interposer_dir: &std::path::Path) -> Result<(), Stream
     Ok(())
 }
 
+/// The loader-shim filenames SL uses for its alternative interposition mode: `sl.interposer.dll`
+/// copied beside the host exe as `dxgi.dll`/`d3d12.dll` so it fronts the *system* DXGI/D3D12. This
+/// crate does NOT use that mode (see [`reject_loader_shims`]).
+const LOADER_SHIM_NAMES: &[&str] = &["dxgi.dll", "d3d12.dll"];
+
+/// True iff `a` and `b` are byte-for-byte identical files. A read failure on either is treated as
+/// "not identical" — the caller then falls through to the normal interposer load, which surfaces any
+/// genuine problem with its own typed error.
+fn files_have_equal_bytes(a: &Path, b: &Path) -> bool {
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Core (testable) loader-shim detector: return the first `dxgi.dll`/`d3d12.dll` in `exe_dir` for
+/// which `is_shim` is true. The predicate is injected so this is unit-testable without staging real
+/// DLLs; production tests **byte-identity to the interposer about to be loaded** (see
+/// [`reject_loader_shims`]). That is precise: an unrelated `dxgi.dll` (a system forwarder, or a non-SL
+/// wrapper such as ReShade) is never an exact copy of the interposer, so it is NOT flagged.
+fn find_loader_shim(exe_dir: &Path, is_shim: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    for name in LOADER_SHIM_NAMES {
+        let candidate = exe_dir.join(name);
+        if candidate.is_file() && is_shim(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Fail fast on the SL loader-shim ⨯ wgpu-fork-proxy conflict, BEFORE the interposer is touched.
+///
+/// SL supports two mutually-exclusive interposition modes. This crate uses the **proxy** path: it
+/// loads `sl.interposer.dll` explicitly and the wgpu fork upgrades its DXGI factory to an SL proxy.
+/// The **loader-shim** mode instead stages `sl.interposer.dll` beside the exe as `dxgi.dll`/`d3d12.dll`
+/// so SL fronts the *system* DXGI/D3D12. If a loader-shim is ALSO present, `slInit`'s `getSystemCaps`
+/// enumerates adapters through the shim'd DXGI/D3D12, re-enters the interposer, and recurses until the
+/// stack overflows — a hard crash SL only reports as the opaque `eErrorExceptionHandler`. We detect
+/// the shim as a `dxgi.dll`/`d3d12.dll` beside the exe that is **byte-identical to `interposer`** (the
+/// one we are about to load): the documented mistake copies `sl.interposer.dll` to those names from the
+/// same SDK, so they match exactly. This is precise (an unrelated `dxgi.dll` never matches, so there is
+/// no false positive — including under the `STREAMLINE_ALLOW_UNVERIFIED_SIGNER` opt-out, which this
+/// path does not consult) and we return an actionable [`StreamlineError::LoaderShimConflict`] instead
+/// of crashing. Files are read only for a `dxgi.dll`/`d3d12.dll` that actually exists beside the exe,
+/// so the happy path pays nothing. Not being able to locate the exe dir is non-fatal.
+fn reject_loader_shims(interposer: &Path) -> Result<(), StreamlineError> {
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    else {
+        return Ok(());
+    };
+    if let Some(shim) = find_loader_shim(&exe_dir, |candidate| {
+        files_have_equal_bytes(candidate, interposer)
+    }) {
+        return Err(StreamlineError::LoaderShimConflict(shim));
+    }
+    Ok(())
+}
+
 /// Build the absolute path to the interposer (`<sdk>/bin/x64/sl.interposer.dll`) from an explicit
 /// SDK root, or [`StreamlineError::SdkPathNotSet`] if `sdk` is `None`.
 ///
 /// Split from [`interposer_path`] (which reads the env var) so the path-building + missing-SDK logic
 /// is unit-testable without mutating the process environment.
 ///
-/// The runner places the loader shim (sl.interposer.dll copied as dxgi.dll + d3d12.dll) next to the
-/// exe separately; THIS path is only used to obtain the exported `sl*` entry points.
+/// THIS path is only used to obtain the exported `sl*` entry points. (This crate does NOT use SL's
+/// loader-shim mode: a `dxgi.dll`/`d3d12.dll` copy of the interposer beside the exe is rejected at
+/// load time — see [`reject_loader_shims`].)
 fn interposer_path_from(sdk: Option<OsString>) -> Result<PathBuf, StreamlineError> {
     let sdk = sdk.ok_or(StreamlineError::SdkPathNotSet)?;
     let mut path = PathBuf::from(sdk);
@@ -248,8 +310,9 @@ impl SlApi {
     ///
     /// SECURITY POSTURE (not a closed surface): because the default search order is preserved, this
     /// verifies only a KNOWN, ENUMERATED set of siblings. It does NOT cover an attacker-renamed or
-    /// otherwise-unknown DLL the search might still resolve, nor the `dxgi.dll`/`d3d12.dll`
-    /// loader-shims beside the exe (those are the interposer itself, renamed). The
+    /// otherwise-unknown DLL the search might still resolve. (The `dxgi.dll`/`d3d12.dll` loader-shims
+    /// are not part of this crate's deployment — it uses the proxy path — and a renamed-interposer
+    /// `dxgi.dll`/`d3d12.dll` beside the exe is rejected before load; see [`reject_loader_shims`].) The
     /// `$STREAMLINE_SDK/bin/x64` directory and the exe directory MUST therefore be on ACL-restricted
     /// storage writable only by an administrator. Feature functions are left `None` until
     /// [`SlApi::resolve_feature_functions`] runs (after `slSetD3DDevice`).
@@ -261,6 +324,11 @@ impl SlApi {
     /// Streamline SDK installed.
     pub unsafe fn load() -> Result<Self, StreamlineError> {
         let path = resolve_existing_interposer(std::env::var_os(STREAMLINE_SDK_ENV))?;
+
+        // Fail fast on the SL loader-shim conflict BEFORE we touch the interposer: a dxgi.dll/d3d12.dll
+        // byte-copy of the interposer beside the exe would otherwise make slInit's getSystemCaps recurse
+        // and overflow the stack. This crate interposes via the wgpu-fork proxy path, not loader-shims.
+        reject_loader_shims(&path)?;
 
         // Hard gate: refuse to load an interposer that is not a trusted, NVIDIA-signed binary. We
         // verify and load the SAME `path` value (no canonicalization: a `\\?\` verbatim path breaks
@@ -539,8 +607,12 @@ mod tests {
     //! environment.
 
     use super::StreamlineError;
-    use super::{interposer_path_from, ll, resolve, resolve_existing_interposer};
+    use super::{
+        files_have_equal_bytes, find_loader_shim, interposer_path_from, ll, resolve,
+        resolve_existing_interposer,
+    };
     use std::ffi::OsString;
+    use std::path::Path;
 
     #[test]
     fn missing_sdk_env_is_reported() {
@@ -625,5 +697,57 @@ mod tests {
             f as usize, 0,
             "resolved a present export to a null fn-pointer"
         );
+    }
+
+    /// The detector flags a `dxgi.dll`/`d3d12.dll` beside the exe that is byte-identical to the
+    /// interposer (the SL interposer renamed) but leaves a differing/unrelated `dxgi.dll` and non-shim
+    /// names alone. Exercises the REAL byte-identity predicate (`files_have_equal_bytes`) — no signed
+    /// fixture, no GPU/SDK.
+    #[test]
+    fn loader_shim_detector_flags_only_interposer_copies() {
+        use std::fs;
+        const IMG: &[u8] = b"INTERPOSER-IMAGE-BYTES";
+        let dir = std::env::temp_dir().join("dlss_wgpu_dx12_loader_shim_test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp exe dir");
+        let interposer = dir.join("sl.interposer.dll");
+        fs::write(&interposer, IMG).expect("write interposer");
+        // dxgi.dll is an exact copy (the shim); d3d12.dll is unrelated; sl.common.dll is an exact copy
+        // but is NOT a loader-shim name, so it must be ignored.
+        fs::write(dir.join("dxgi.dll"), IMG).expect("write dxgi");
+        fs::write(dir.join("d3d12.dll"), b"some-other-dll").expect("write d3d12");
+        fs::write(dir.join("sl.common.dll"), IMG).expect("write sibling");
+
+        let is_copy = |p: &Path| files_have_equal_bytes(p, &interposer);
+        assert_eq!(
+            find_loader_shim(&dir, is_copy).as_deref(),
+            Some(dir.join("dxgi.dll").as_path()),
+            "an exact interposer copy named dxgi.dll must be flagged"
+        );
+
+        // Now dxgi.dll differs and d3d12.dll is the exact copy -> d3d12.dll is flagged.
+        fs::write(dir.join("dxgi.dll"), b"now-unrelated").expect("rewrite dxgi");
+        fs::write(dir.join("d3d12.dll"), IMG).expect("rewrite d3d12");
+        assert_eq!(
+            find_loader_shim(&dir, |p: &Path| files_have_equal_bytes(p, &interposer)).as_deref(),
+            Some(dir.join("d3d12.dll").as_path())
+        );
+
+        // Neither shim is a copy of the interposer -> None (a legitimate unrelated dxgi.dll/d3d12.dll).
+        fs::write(dir.join("dxgi.dll"), b"x").expect("rewrite dxgi");
+        fs::write(dir.join("d3d12.dll"), b"y").expect("rewrite d3d12");
+        assert!(
+            find_loader_shim(&dir, |p: &Path| files_have_equal_bytes(p, &interposer)).is_none(),
+            "non-copy dxgi/d3d12 must NOT be flagged"
+        );
+
+        // Absent shims -> None even if the predicate would say yes.
+        let empty = std::env::temp_dir().join("dlss_wgpu_dx12_loader_shim_empty_test");
+        let _ = fs::remove_dir_all(&empty);
+        fs::create_dir_all(&empty).expect("create empty temp dir");
+        assert!(find_loader_shim(&empty, |_p: &Path| true).is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty);
     }
 }

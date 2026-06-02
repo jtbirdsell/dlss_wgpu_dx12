@@ -45,6 +45,18 @@ pub enum StreamlineError {
     #[error("sl.interposer.dll was not found at the expected path: {0}")]
     InterposerNotFound(std::path::PathBuf),
 
+    /// A Streamline "loader-shim" copy of `sl.interposer.dll` (named `dxgi.dll` or `d3d12.dll`) is
+    /// staged beside the executable. This crate interposes via the wgpu-fork **proxy** path (it loads
+    /// `sl.interposer.dll` explicitly and the fork upgrades its DXGI factory), which is mutually
+    /// exclusive with SL's loader-shim mode: with a shim present, `slInit`'s `getSystemCaps`
+    /// enumerates adapters *through* the shim'd DXGI/D3D12, re-enters the interposer, and recurses
+    /// until the stack overflows — surfacing only as an opaque `eErrorExceptionHandler`. The shim must
+    /// be removed from the executable's directory.
+    #[error(
+        "a Streamline loader-shim is staged beside the executable ({0}): it is a byte-for-byte copy of sl.interposer.dll renamed to dxgi.dll or d3d12.dll. This crate uses the wgpu-fork proxy interposition path, which is incompatible with the loader-shim mode — leaving the shim in place makes slInit's getSystemCaps recurse and overflow the stack. Remove dxgi.dll and d3d12.dll from the executable's directory (keep only sl.interposer.dll + the sl.* plugins)."
+    )]
+    LoaderShimConflict(std::path::PathBuf),
+
     /// The interposer's Authenticode signature failed verification (untrusted, unsigned, revoked,
     /// or not chaining to a trusted root). Loading is hard-gated on this passing.
     #[error("sl.interposer.dll signature verification failed: {0}")]

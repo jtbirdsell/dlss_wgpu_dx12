@@ -206,7 +206,8 @@ DLSS-G is silent about most failures — it simply declines to generate frames. 
 3. **Stage the Streamline DLLs beside your executable:** `sl.interposer.dll`, `sl.common.dll`,
    `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, and `nvngx_dlssg.dll`. Without them `slInit` /
    DLSS-G load fails and no frames are generated. (See [docs/SETUP.md](docs/SETUP.md) for exact
-   sources and the loader-shim copies.)
+   sources. Do **not** also stage `dxgi.dll`/`d3d12.dll` loader-shim copies — this crate uses the
+   interposer proxy path and rejects those shims at load time.)
 4. **Set the `STREAMLINE_SDK` environment variable** to the Streamline SDK root so the crate can
    locate and signature-verify the interposer at runtime (`$STREAMLINE_SDK/bin/x64/sl.interposer.dll`).
 5. **Teardown order matters.** Disable Frame Generation and idle the GPU *before* destroying the
