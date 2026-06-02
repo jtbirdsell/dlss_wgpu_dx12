@@ -141,7 +141,13 @@ impl NgxFeature {
             *mut NVSDK_NGX_Parameter,
         ) -> NVSDK_NGX_Result,
     ) -> Result<(), DlssError> {
-        let sdk = self.sdk.lock().unwrap_or_else(|p| p.into_inner());
+        // Narrowed critical section (audit L12): the SDK `Mutex` serializes NGX FFI, which is NOT
+        // thread-safe, but the only NGX touch here is the `with_raw_command_list` evaluate closure
+        // (it reads `sdk.parameters` and calls the raw EVALUATE_*_EXT export). Encoder creation,
+        // `transition_resources`, `finish()`, and `queue.submit` are pure wgpu and touch no NGX
+        // state, so they run OUTSIDE the guard — multiple cameras sharing one `Arc<Mutex<DlssSdk>>`
+        // no longer serialize their per-frame CPU recording + submit. The guard must still cover the
+        // entire evaluate closure (it is the only NGX call in this method).
 
         // Transitions go through the wgpu API (its tracker knows the correct before-states) on a
         // dedicated encoder; the NGX evaluate uses the raw command list on a SEPARATE encoder. wgpu
@@ -162,10 +168,19 @@ impl NgxFeature {
         // SAFETY: `with_raw_command_list` hands the closure the encoder's open raw command list; the
         // closure forwards it (with the feature handle + locked NGX parameters) to the NGX
         // EVALUATE_*_EXT export.
-        let evaluated = unsafe {
-            with_raw_command_list(&mut eval_encoder, |cmd_list| {
-                check_ngx_result(evaluate(cmd_list, self.feature, sdk.parameters))
-            })
+        //
+        // Poison-tolerant lock acquired here and held ONLY across the NGX evaluate: a poisoned guard
+        // does not invalidate the parameter pointer, so recovering it is sound and avoids a panic.
+        // The `unsafe { with_raw_command_list(..) }` is the tail expression of this block (NO
+        // trailing semicolon) so the block yields the evaluate result; the `sdk` guard then drops at
+        // the closing brace, before `finish()`/`queue.submit` (pure wgpu, no NGX).
+        let evaluated = {
+            let sdk = self.sdk.lock().unwrap_or_else(|p| p.into_inner());
+            unsafe {
+                with_raw_command_list(&mut eval_encoder, |cmd_list| {
+                    check_ngx_result(evaluate(cmd_list, self.feature, sdk.parameters))
+                })
+            }
         };
         match evaluated {
             None => return Err(DlssError::FeatureNotSupported),
