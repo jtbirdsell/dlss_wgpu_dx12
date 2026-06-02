@@ -5,8 +5,7 @@
 
 use crate::{
     DlssError, DlssFeatureFlags, DlssPerfQualityMode, DlssSdk, DlssTexture,
-    ngx_feature::NgxFeature,
-    nvsdk_ngx::*,
+    ngx_feature::NgxFeature, nvsdk_ngx::*,
 };
 use glam::{UVec2, Vec2};
 use std::{
@@ -173,7 +172,8 @@ impl DlssRayReconstructionContext {
             // Pin the DLSS-4 render preset, then create the RR feature at the optimal resolution.
             |cmd_list, resolutions, parameters, feature_out| {
                 let mut create_params = NVSDK_NGX_DLSSD_Create_Params {
-                    InDenoiseMode: NVSDK_NGX_DLSS_Denoise_Mode_NVSDK_NGX_DLSS_Denoise_Mode_DLUnified,
+                    InDenoiseMode:
+                        NVSDK_NGX_DLSS_Denoise_Mode_NVSDK_NGX_DLSS_Denoise_Mode_DLUnified,
                     InRoughnessMode: match roughness_mode {
                         RoughnessMode::Unpacked => {
                             NVSDK_NGX_DLSS_Roughness_Mode_NVSDK_NGX_DLSS_Roughness_Mode_Unpacked
@@ -186,7 +186,9 @@ impl DlssRayReconstructionContext {
                         DepthType::Linear => {
                             NVSDK_NGX_DLSS_Depth_Type_NVSDK_NGX_DLSS_Depth_Type_Linear
                         }
-                        DepthType::Hardware => NVSDK_NGX_DLSS_Depth_Type_NVSDK_NGX_DLSS_Depth_Type_HW,
+                        DepthType::Hardware => {
+                            NVSDK_NGX_DLSS_Depth_Type_NVSDK_NGX_DLSS_Depth_Type_HW
+                        }
                     },
                     InWidth: resolutions.optimal.x,
                     InHeight: resolutions.optimal.y,
@@ -209,7 +211,8 @@ impl DlssRayReconstructionContext {
                         NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA.as_ptr(),
                         NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality.as_ptr(),
                         NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced.as_ptr(),
-                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance.as_ptr(),
+                        NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance
+                            .as_ptr(),
                         NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance
                             .as_ptr(),
                         NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality
@@ -264,17 +267,21 @@ impl DlssRayReconstructionContext {
         eval.InMVScaleX = mv_scale.x;
         eval.InMVScaleY = mv_scale.y;
 
-        self.feature
-            .evaluate(queue, params.barrier_list(), |cmd_list, feature, parameters| {
+        self.feature.evaluate(
+            queue,
+            params.barrier_list(),
+            |cmd_list, feature, parameters| {
                 // SAFETY: `cmd_list`/`feature`/`parameters` are the open list, the live feature
                 // handle, and the locked NGX params; `eval` lives on the stack through the call.
                 unsafe { NGX_D3D12_EVALUATE_DLSSD_EXT(cmd_list, feature, parameters, &mut eval) }
-            })
+            },
+        )
     }
 
     /// Suggested subpixel camera jitter (Halton sequence) for a given frame.
     pub fn suggested_jitter(&self, frame_number: u32, render_resolution: UVec2) -> Vec2 {
-        self.feature.suggested_jitter(frame_number, render_resolution)
+        self.feature
+            .suggested_jitter(frame_number, render_resolution)
     }
 
     /// Suggested mip bias for sampling textures at the render resolution.

@@ -138,20 +138,92 @@ fn run() -> Result<(), DlssError> {
     let output_usage = TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
 
     // SR inputs (color/depth/mvec) at SR render resolution + a dedicated SR output.
-    let sr_color = target(&device, "sr_color", sr_render, TextureFormat::Rgba16Float, input_usage);
-    let sr_depth = target(&device, "sr_depth", sr_render, TextureFormat::R32Float, input_usage);
-    let sr_mvec = target(&device, "sr_mvec", sr_render, TextureFormat::Rg16Float, input_usage);
-    let sr_output = target(&device, "sr_output", upscaled, TextureFormat::Rgba16Float, output_usage);
+    let sr_color = target(
+        &device,
+        "sr_color",
+        sr_render,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let sr_depth = target(
+        &device,
+        "sr_depth",
+        sr_render,
+        TextureFormat::R32Float,
+        input_usage,
+    );
+    let sr_mvec = target(
+        &device,
+        "sr_mvec",
+        sr_render,
+        TextureFormat::Rg16Float,
+        input_usage,
+    );
+    let sr_output = target(
+        &device,
+        "sr_output",
+        upscaled,
+        TextureFormat::Rgba16Float,
+        output_usage,
+    );
 
     // RR inputs: the 8 guide buffers from ray_reconstruction.rs at RR render resolution + an output.
-    let rr_color = target(&device, "rr_color", rr_render, TextureFormat::Rgba16Float, input_usage);
-    let rr_diffuse = target(&device, "rr_diffuse", rr_render, TextureFormat::Rgba16Float, input_usage);
-    let rr_specular = target(&device, "rr_specular", rr_render, TextureFormat::Rgba16Float, input_usage);
-    let rr_normals = target(&device, "rr_normals", rr_render, TextureFormat::Rgba16Float, input_usage);
-    let rr_roughness = target(&device, "rr_roughness", rr_render, TextureFormat::R16Float, input_usage);
-    let rr_depth = target(&device, "rr_depth", rr_render, TextureFormat::R32Float, input_usage);
-    let rr_mvec = target(&device, "rr_mvec", rr_render, TextureFormat::Rg16Float, input_usage);
-    let rr_output = target(&device, "rr_output", upscaled, TextureFormat::Rgba16Float, output_usage);
+    let rr_color = target(
+        &device,
+        "rr_color",
+        rr_render,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let rr_diffuse = target(
+        &device,
+        "rr_diffuse",
+        rr_render,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let rr_specular = target(
+        &device,
+        "rr_specular",
+        rr_render,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let rr_normals = target(
+        &device,
+        "rr_normals",
+        rr_render,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let rr_roughness = target(
+        &device,
+        "rr_roughness",
+        rr_render,
+        TextureFormat::R16Float,
+        input_usage,
+    );
+    let rr_depth = target(
+        &device,
+        "rr_depth",
+        rr_render,
+        TextureFormat::R32Float,
+        input_usage,
+    );
+    let rr_mvec = target(
+        &device,
+        "rr_mvec",
+        rr_render,
+        TextureFormat::Rg16Float,
+        input_usage,
+    );
+    let rr_output = target(
+        &device,
+        "rr_output",
+        upscaled,
+        TextureFormat::Rgba16Float,
+        output_usage,
+    );
 
     // --- Toggle loop: SR for the first phase, RR for the second. ---------------------------------
     let total_frames = FRAMES_PER_PHASE * 2;
@@ -196,7 +268,9 @@ fn run() -> Result<(), DlssError> {
                     motion_vectors: DlssTexture { texture: &sr_mvec },
                     exposure: DlssExposure::Automatic,
                     bias: None,
-                    dlss_output: DlssTexture { texture: &sr_output },
+                    dlss_output: DlssTexture {
+                        texture: &sr_output,
+                    },
                     reset: phase_frame == 0,
                     jitter_offset,
                     partial_texture_size: Some(sr_render),
@@ -239,13 +313,23 @@ fn run() -> Result<(), DlssError> {
             rr_ctx.render(
                 DlssRayReconstructionParameters {
                     color: DlssTexture { texture: &rr_color },
-                    diffuse_albedo: DlssTexture { texture: &rr_diffuse },
-                    specular_albedo: DlssTexture { texture: &rr_specular },
-                    normals: DlssTexture { texture: &rr_normals },
-                    roughness: DlssTexture { texture: &rr_roughness },
+                    diffuse_albedo: DlssTexture {
+                        texture: &rr_diffuse,
+                    },
+                    specular_albedo: DlssTexture {
+                        texture: &rr_specular,
+                    },
+                    normals: DlssTexture {
+                        texture: &rr_normals,
+                    },
+                    roughness: DlssTexture {
+                        texture: &rr_roughness,
+                    },
                     depth: DlssTexture { texture: &rr_depth },
                     motion_vectors: DlssTexture { texture: &rr_mvec },
-                    output: DlssTexture { texture: &rr_output },
+                    output: DlssTexture {
+                        texture: &rr_output,
+                    },
                     reset: phase_frame == 0,
                     jitter_offset,
                     partial_texture_size: Some(rr_render),

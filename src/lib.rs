@@ -52,7 +52,7 @@ pub use render_parameters::{DlssExposure, DlssRenderParameters, DlssTexture};
 pub use sdk::DlssSdk;
 #[cfg(feature = "frame-generation")]
 pub use streamline::{
-    DEFAULT_ENGINE_VERSION, DEFAULT_PROJECT_ID, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, DEFAULT_ENGINE_VERSION, DEFAULT_PROJECT_ID,
     FgConstants, FgResource, FgResources, FgUi, Frame, FrameGenerationContext, FrameGenerationMode,
     FrameGenerationOptions, FrameGenerationState, Streamline, StreamlineError,
 };

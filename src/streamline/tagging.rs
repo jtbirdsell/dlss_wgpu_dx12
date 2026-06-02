@@ -343,10 +343,30 @@ fn to_float4x4(m: [[f32; 4]; 4]) -> super::types::Float4x4 {
     use super::types::Float4;
     super::types::Float4x4 {
         row: [
-            Float4 { x: m[0][0], y: m[0][1], z: m[0][2], w: m[0][3] },
-            Float4 { x: m[1][0], y: m[1][1], z: m[1][2], w: m[1][3] },
-            Float4 { x: m[2][0], y: m[2][1], z: m[2][2], w: m[2][3] },
-            Float4 { x: m[3][0], y: m[3][1], z: m[3][2], w: m[3][3] },
+            Float4 {
+                x: m[0][0],
+                y: m[0][1],
+                z: m[0][2],
+                w: m[0][3],
+            },
+            Float4 {
+                x: m[1][0],
+                y: m[1][1],
+                z: m[1][2],
+                w: m[1][3],
+            },
+            Float4 {
+                x: m[2][0],
+                y: m[2][1],
+                z: m[2][2],
+                w: m[2][3],
+            },
+            Float4 {
+                x: m[3][0],
+                y: m[3][1],
+                z: m[3][2],
+                w: m[3][3],
+            },
         ],
     }
 }
@@ -361,22 +381,22 @@ pub(crate) fn dxgi_format_of(format: wgpu::TextureFormat) -> u32 {
     use wgpu::TextureFormat as F;
     match format {
         // Color / swapchain
-        F::Bgra8Unorm => 87,       // DXGI_FORMAT_B8G8R8A8_UNORM
-        F::Bgra8UnormSrgb => 91,   // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
-        F::Rgba8Unorm => 28,       // DXGI_FORMAT_R8G8B8A8_UNORM
-        F::Rgba8UnormSrgb => 29,   // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
-        F::Rgba16Float => 10,      // DXGI_FORMAT_R16G16B16A16_FLOAT
-        F::Rgb10a2Unorm => 24,     // DXGI_FORMAT_R10G10B10A2_UNORM
+        F::Bgra8Unorm => 87,     // DXGI_FORMAT_B8G8R8A8_UNORM
+        F::Bgra8UnormSrgb => 91, // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+        F::Rgba8Unorm => 28,     // DXGI_FORMAT_R8G8B8A8_UNORM
+        F::Rgba8UnormSrgb => 29, // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+        F::Rgba16Float => 10,    // DXGI_FORMAT_R16G16B16A16_FLOAT
+        F::Rgb10a2Unorm => 24,   // DXGI_FORMAT_R10G10B10A2_UNORM
         // Depth
-        F::R32Float => 41,         // DXGI_FORMAT_R32_FLOAT
-        F::Depth32Float => 40,     // DXGI_FORMAT_D32_FLOAT
+        F::R32Float => 41,                             // DXGI_FORMAT_R32_FLOAT
+        F::Depth32Float => 40,                         // DXGI_FORMAT_D32_FLOAT
         F::Depth24Plus | F::Depth24PlusStencil8 => 45, // DXGI_FORMAT_D24_UNORM_S8_UINT
         // Motion vectors
-        F::Rg16Float => 34,        // DXGI_FORMAT_R16G16_FLOAT
-        F::Rg32Float => 16,        // DXGI_FORMAT_R32G32_FLOAT
+        F::Rg16Float => 34, // DXGI_FORMAT_R16G16_FLOAT
+        F::Rg32Float => 16, // DXGI_FORMAT_R32G32_FLOAT
         // UI alpha-only mask
-        F::R8Unorm => 61,          // DXGI_FORMAT_R8_UNORM
-        F::R16Float => 54,         // DXGI_FORMAT_R16_FLOAT
+        F::R8Unorm => 61,  // DXGI_FORMAT_R8_UNORM
+        F::R16Float => 54, // DXGI_FORMAT_R16_FLOAT
         other => {
             log::warn!(
                 "dxgi_format_of: unmapped wgpu format {other:?}; using DXGI_FORMAT_UNKNOWN(0)"
@@ -390,9 +410,9 @@ pub(crate) fn dxgi_format_of(format: wgpu::TextureFormat) -> u32 {
 mod tests {
     use super::super::types::Boolean;
     use super::{
-        dxgi_format_of, tag_buffer_types, FgConstants, UiTagKind, K_BUFFER_TYPE_DEPTH,
-        K_BUFFER_TYPE_HUD_LESS_COLOR, K_BUFFER_TYPE_MOTION_VECTORS, K_BUFFER_TYPE_UI_ALPHA,
-        K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
+        FgConstants, K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_HUD_LESS_COLOR,
+        K_BUFFER_TYPE_MOTION_VECTORS, K_BUFFER_TYPE_UI_ALPHA, K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
+        UiTagKind, dxgi_format_of, tag_buffer_types,
     };
     use glam::{UVec2, Vec2};
 

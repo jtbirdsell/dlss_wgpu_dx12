@@ -1,7 +1,6 @@
 use crate::{
     DlssError, DlssExposure, DlssFeatureFlags, DlssPerfQualityMode, DlssRenderParameters, DlssSdk,
-    ngx_feature::NgxFeature,
-    nvsdk_ngx::*,
+    ngx_feature::NgxFeature, nvsdk_ngx::*,
 };
 use glam::{UVec2, Vec2};
 use std::{
@@ -183,7 +182,8 @@ impl DlssContext {
 
     /// Suggested subpixel camera jitter (Halton sequence) for a given frame.
     pub fn suggested_jitter(&self, frame_number: u32, render_resolution: UVec2) -> Vec2 {
-        self.feature.suggested_jitter(frame_number, render_resolution)
+        self.feature
+            .suggested_jitter(frame_number, render_resolution)
     }
 
     /// Suggested mip bias for sampling textures at the render resolution.

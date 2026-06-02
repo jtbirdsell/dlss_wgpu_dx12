@@ -145,11 +145,11 @@ impl NgxFeature {
                 });
         barrier_encoder.transition_resources(iter::empty(), barriers);
 
-        let mut eval_encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("dlss_evaluate"),
-            });
+        let mut eval_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("dlss_evaluate"),
+                });
         // SAFETY: `with_raw_command_list` hands the closure the encoder's open raw command list; the
         // closure forwards it (with the feature handle + locked NGX parameters) to the NGX
         // EVALUATE_*_EXT export.

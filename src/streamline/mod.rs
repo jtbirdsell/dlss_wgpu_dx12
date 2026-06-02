@@ -37,11 +37,11 @@ mod tagging;
 
 // Re-export the public surface for the crate root to `pub use`.
 pub use frame_gen::{
-    Frame, FrameGenerationContext, FrameGenerationMode, FrameGenerationOptions,
-    FrameGenerationState, Streamline, DEFAULT_ENGINE_VERSION, DEFAULT_PROJECT_ID,
+    DEFAULT_ENGINE_VERSION, DEFAULT_PROJECT_ID, Frame, FrameGenerationContext, FrameGenerationMode,
+    FrameGenerationOptions, FrameGenerationState, Streamline,
 };
 pub use tagging::{
-    FgConstants, FgResource, FgResources, FgUi, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, FgConstants, FgResource, FgResources, FgUi,
 };
 // The substrate error type is the FG error type (mirrors how DlssError surfaces for SR/RR).
 pub use types::StreamlineError;

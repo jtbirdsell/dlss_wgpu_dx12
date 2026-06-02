@@ -52,16 +52,17 @@ fn sdk_init_is_ok_or_feature_not_supported() {
 
     // Offscreen device + queue. Default features/limits are enough; DlssSdk reaches through the HAL
     // for the raw ID3D12Device, so nothing extra is required here.
-    let (device, _queue) = match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("dlss_wgpu_dx12 headless test device"),
-        ..Default::default()
-    })) {
-        Ok(device_queue) => device_queue,
-        Err(e) => {
-            eprintln!("skipping: could not create a Dx12 device ({e})");
-            return;
-        }
-    };
+    let (device, _queue) =
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("dlss_wgpu_dx12 headless test device"),
+            ..Default::default()
+        })) {
+            Ok(device_queue) => device_queue,
+            Err(e) => {
+                eprintln!("skipping: could not create a Dx12 device ({e})");
+                return;
+            }
+        };
 
     // The contract under test: init must either succeed or degrade to FeatureNotSupported, and it
     // must never panic. A non-RTX or non-Dx12 device yields Err(FeatureNotSupported); a DLSS-capable
@@ -175,14 +176,19 @@ fn frame_generation_context_and_frame_contract() {
             "FrameGenerationContext::new must be Ok or Err(FeatureNotSupported), got Err({other:?}): {other}"
         ),
     };
-    eprintln!("FrameGenerationContext bound; DLSS-G enabled = {}", ctx.is_enabled());
+    eprintln!(
+        "FrameGenerationContext bound; DLSS-G enabled = {}",
+        ctx.is_enabled()
+    );
 
     // (3) Drive the surface-free part of one frame: slGetNewFrameToken + slReflexSleep + the
     // simulation markers + slSetConstants. acquire/tag/present need a real swapchain surface and are
     // covered by the examples, so we stop here and let the Frame drop (a windowless frame is
     // intentionally never presented; Drop logs the abort, which is expected).
     {
-        let frame = ctx.begin_frame(0).expect("begin_frame(0) should succeed on hardware");
+        let frame = ctx
+            .begin_frame(0)
+            .expect("begin_frame(0) should succeed on hardware");
         frame
             .set_constants(&FgConstants::new())
             .expect("set_constants should succeed on hardware");
@@ -248,11 +254,17 @@ fn stage_ngx_dll(dll_name: &str) -> bool {
         return false;
     }
     let exe = std::env::current_exe().expect("current_exe");
-    let dst = exe.parent().expect("test binary has a parent dir").join(dll_name);
+    let dst = exe
+        .parent()
+        .expect("test binary has a parent dir")
+        .join(dll_name);
     match std::fs::copy(&src, &dst) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("skipping: could not stage {dll_name} -> {}: {e}", dst.display());
+            eprintln!(
+                "skipping: could not stage {dll_name} -> {}: {e}",
+                dst.display()
+            );
             false
         }
     }
@@ -278,7 +290,10 @@ fn request_nvidia_dx12_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         }
     };
     let info = adapter.get_info();
-    eprintln!("using adapter: {:?} (vendor {:#06x})", info.name, info.vendor);
+    eprintln!(
+        "using adapter: {:?} (vendor {:#06x})",
+        info.name, info.vendor
+    );
     if info.vendor != 0x10DE {
         eprintln!("skipping: adapter is not NVIDIA; DLSS is unavailable");
         return None;
@@ -490,9 +505,27 @@ fn dlss_super_resolution_evaluates_and_writes_output() {
     eprintln!("SR: render {render_res:?} -> upscaled {upscaled:?}");
 
     let input_usage = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
-    let color = color_target(&device, "sr_color", render_res, TextureFormat::Rgba16Float, input_usage);
-    let depth = color_target(&device, "sr_depth", render_res, TextureFormat::R32Float, input_usage);
-    let motion = color_target(&device, "sr_motion", render_res, TextureFormat::Rg16Float, input_usage);
+    let color = color_target(
+        &device,
+        "sr_color",
+        render_res,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let depth = color_target(
+        &device,
+        "sr_depth",
+        render_res,
+        TextureFormat::R32Float,
+        input_usage,
+    );
+    let motion = color_target(
+        &device,
+        "sr_motion",
+        render_res,
+        TextureFormat::Rg16Float,
+        input_usage,
+    );
     let output = color_target(
         &device,
         "sr_output",
@@ -519,7 +552,16 @@ fn dlss_super_resolution_evaluates_and_writes_output() {
         });
         // A NON-black color so the upscaled output is non-trivially non-zero (a black input would
         // upscale to black and defeat the output assertion).
-        clear_color(&mut encoder, &color, Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 });
+        clear_color(
+            &mut encoder,
+            &color,
+            Color {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            },
+        );
         clear_color(&mut encoder, &depth, Color::WHITE);
         clear_color(&mut encoder, &motion, Color::TRANSPARENT);
         queue.submit([encoder.finish()]);
@@ -599,13 +641,55 @@ fn dlss_ray_reconstruction_evaluates_and_writes_output() {
     eprintln!("RR: render {render_res:?} -> upscaled {upscaled:?}");
 
     let input_usage = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
-    let color = color_target(&device, "rr_color", render_res, TextureFormat::Rgba16Float, input_usage);
-    let diffuse = color_target(&device, "rr_diffuse", render_res, TextureFormat::Rgba16Float, input_usage);
-    let specular = color_target(&device, "rr_specular", render_res, TextureFormat::Rgba16Float, input_usage);
-    let normals = color_target(&device, "rr_normals", render_res, TextureFormat::Rgba16Float, input_usage);
-    let roughness = color_target(&device, "rr_roughness", render_res, TextureFormat::R16Float, input_usage);
-    let depth = color_target(&device, "rr_depth", render_res, TextureFormat::R32Float, input_usage);
-    let motion = color_target(&device, "rr_motion", render_res, TextureFormat::Rg16Float, input_usage);
+    let color = color_target(
+        &device,
+        "rr_color",
+        render_res,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let diffuse = color_target(
+        &device,
+        "rr_diffuse",
+        render_res,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let specular = color_target(
+        &device,
+        "rr_specular",
+        render_res,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let normals = color_target(
+        &device,
+        "rr_normals",
+        render_res,
+        TextureFormat::Rgba16Float,
+        input_usage,
+    );
+    let roughness = color_target(
+        &device,
+        "rr_roughness",
+        render_res,
+        TextureFormat::R16Float,
+        input_usage,
+    );
+    let depth = color_target(
+        &device,
+        "rr_depth",
+        render_res,
+        TextureFormat::R32Float,
+        input_usage,
+    );
+    let motion = color_target(
+        &device,
+        "rr_motion",
+        render_res,
+        TextureFormat::Rg16Float,
+        input_usage,
+    );
     let output = color_target(
         &device,
         "rr_output",
@@ -630,12 +714,57 @@ fn dlss_ray_reconstruction_evaluates_and_writes_output() {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("rr_inputs"),
         });
-        clear_color(&mut encoder, &color, Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 });
-        clear_color(&mut encoder, &diffuse, Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 });
-        clear_color(&mut encoder, &specular, Color { r: 0.1, g: 0.1, b: 0.1, a: 1.0 });
+        clear_color(
+            &mut encoder,
+            &color,
+            Color {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            },
+        );
+        clear_color(
+            &mut encoder,
+            &diffuse,
+            Color {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            },
+        );
+        clear_color(
+            &mut encoder,
+            &specular,
+            Color {
+                r: 0.1,
+                g: 0.1,
+                b: 0.1,
+                a: 1.0,
+            },
+        );
         // Packed roughness in normals.w; a unit-ish normal so RR has a plausible guide.
-        clear_color(&mut encoder, &normals, Color { r: 0.0, g: 0.0, b: 1.0, a: 0.5 });
-        clear_color(&mut encoder, &roughness, Color { r: 0.5, g: 0.0, b: 0.0, a: 0.0 });
+        clear_color(
+            &mut encoder,
+            &normals,
+            Color {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 0.5,
+            },
+        );
+        clear_color(
+            &mut encoder,
+            &roughness,
+            Color {
+                r: 0.5,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+        );
         clear_color(&mut encoder, &depth, Color::WHITE);
         clear_color(&mut encoder, &motion, Color::TRANSPARENT);
         queue.submit([encoder.finish()]);
@@ -647,7 +776,9 @@ fn dlss_ray_reconstruction_evaluates_and_writes_output() {
                     diffuse_albedo: DlssTexture { texture: &diffuse },
                     specular_albedo: DlssTexture { texture: &specular },
                     normals: DlssTexture { texture: &normals },
-                    roughness: DlssTexture { texture: &roughness },
+                    roughness: DlssTexture {
+                        texture: &roughness,
+                    },
                     depth: DlssTexture { texture: &depth },
                     motion_vectors: DlssTexture { texture: &motion },
                     output: DlssTexture { texture: &output },

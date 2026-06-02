@@ -194,10 +194,10 @@ struct GpuState {
     config: wgpu::SurfaceConfiguration,
 
     // The four DLSS-G inputs, all at render resolution (see the spike for the format rationale).
-    depth_tex: wgpu::Texture,    // R32Float
-    mvec_tex: wgpu::Texture,     // Rg16Float
-    hudless_tex: wgpu::Texture,  // surface format
-    ui_tex: wgpu::Texture,       // Rgba8Unorm (color + alpha)
+    depth_tex: wgpu::Texture,   // R32Float
+    mvec_tex: wgpu::Texture,    // Rg16Float
+    hudless_tex: wgpu::Texture, // surface format
+    ui_tex: wgpu::Texture,      // Rgba8Unorm (color + alpha)
 
     // --- Moving-bar render pipeline (genuine, consistent motion) ---
     /// Per-frame uniform (`vec4<f32>`): {x_offset_px, width, height, pad}.
@@ -335,7 +335,11 @@ impl GpuState {
         // --- The four DLSS-G input textures, all at render resolution. ---
         // depth = R32Float, mvec = Rg16Float, hudless = surface format (must match the back buffer),
         // ui = Rgba8Unorm (color + alpha). Cleared/filled each frame; that is enough for the probe.
-        let depth_tex = make_input(&device, "fg depth (R32Float)", wgpu::TextureFormat::R32Float);
+        let depth_tex = make_input(
+            &device,
+            "fg depth (R32Float)",
+            wgpu::TextureFormat::R32Float,
+        );
         let mvec_tex = make_input(
             &device,
             "fg motion vectors (Rg16Float)",
@@ -854,12 +858,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {

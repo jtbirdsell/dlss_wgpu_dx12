@@ -34,7 +34,7 @@
 //! drivers and tools (and the D3D12 debug layer) reject. Ship both `dxcompiler.dll` and `dxil.dll`
 //! from a matching DXC release to be safe.
 
-use wgpu::{Backends, BackendOptions, Dx12BackendOptions, Dx12Compiler, InstanceDescriptor};
+use wgpu::{BackendOptions, Backends, Dx12BackendOptions, Dx12Compiler, InstanceDescriptor};
 
 /// Default file name of the dynamic DXC compiler DLL.
 ///

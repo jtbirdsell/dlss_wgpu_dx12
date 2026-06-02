@@ -104,13 +104,17 @@ pub enum StreamlineError {
 
     /// `slIsFeatureSupported(kFeatureDLSS_G)` reported that DLSS Frame Generation is not supported on
     /// this adapter/driver/OS. Carries the typed result for diagnosis.
-    #[error("DLSS Frame Generation is not supported on this system: slIsFeatureSupported returned {0:?}")]
+    #[error(
+        "DLSS Frame Generation is not supported on this system: slIsFeatureSupported returned {0:?}"
+    )]
     FeatureNotSupported(SlResult),
 
     /// `surface.get_current_texture()` returned a non-presentable status (`Outdated`/`Lost`/other).
     /// This is a recoverable, per-frame condition — the caller should reconfigure the surface and
     /// retry on the next frame. (`Suboptimal` is intentionally passed through, not surfaced here.)
-    #[error("the wgpu surface is unavailable this frame ({status}); reconfigure the surface and retry")]
+    #[error(
+        "the wgpu surface is unavailable this frame ({status}); reconfigure the surface and retry"
+    )]
     SurfaceUnavailable {
         /// The `wgpu::CurrentSurfaceTexture` status that was not `Success`/`Suboptimal`.
         status: String,
@@ -499,10 +503,30 @@ impl Float4x4 {
     pub const fn identity() -> Self {
         Self {
             row: [
-                Float4 { x: 1.0, y: 0.0, z: 0.0, w: 0.0 },
-                Float4 { x: 0.0, y: 1.0, z: 0.0, w: 0.0 },
-                Float4 { x: 0.0, y: 0.0, z: 1.0, w: 0.0 },
-                Float4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
+                Float4 {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                    w: 0.0,
+                },
+                Float4 {
+                    x: 0.0,
+                    y: 1.0,
+                    z: 0.0,
+                    w: 0.0,
+                },
+                Float4 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                    w: 0.0,
+                },
+                Float4 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    w: 1.0,
+                },
             ],
         }
     }
@@ -667,10 +691,26 @@ impl Constants {
             jitter_offset: Float2 { x: 0.0, y: 0.0 },
             mvec_scale: Float2 { x: 1.0, y: 1.0 },
             camera_pinhole_offset: Float2 { x: 0.0, y: 0.0 },
-            camera_pos: Float3 { x: 0.0, y: 0.0, z: 0.0 },
-            camera_up: Float3 { x: 0.0, y: 1.0, z: 0.0 },
-            camera_right: Float3 { x: 1.0, y: 0.0, z: 0.0 },
-            camera_fwd: Float3 { x: 0.0, y: 0.0, z: 1.0 },
+            camera_pos: Float3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            camera_up: Float3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+            camera_right: Float3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            camera_fwd: Float3 {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
             camera_near: 0.1,
             camera_far: 10000.0,
             camera_fov: std::f32::consts::FRAC_PI_2,

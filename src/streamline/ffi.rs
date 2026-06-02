@@ -161,7 +161,9 @@ unsafe fn resolve<T: Copy>(lib: &ll::Library, name: &[u8]) -> Result<T, Streamli
     // a symbol borrowing from `lib`, which `SlApi` keeps alive for the lifetime of the fn pointers.
     let sym: ll::Symbol<*mut c_void> =
         unsafe { lib.get(name) }.map_err(|source| StreamlineError::MissingExport {
-            symbol: String::from_utf8_lossy(name).trim_end_matches('\0').to_string(),
+            symbol: String::from_utf8_lossy(name)
+                .trim_end_matches('\0')
+                .to_string(),
             source,
         })?;
     let raw: *mut c_void = *sym;
@@ -251,7 +253,11 @@ impl SlApi {
     /// # Safety
     /// `T` must match the C++ ABI of the feature function named `name` under `feature`. Must be
     /// called only after `slSetD3DDevice` has succeeded.
-    unsafe fn feature_fn<T: Copy>(&self, feature: Feature, name: &str) -> Result<T, StreamlineError> {
+    unsafe fn feature_fn<T: Copy>(
+        &self,
+        feature: Feature,
+        name: &str,
+    ) -> Result<T, StreamlineError> {
         let cname = CString::new(name).expect("feature function name contained an interior NUL");
         let mut ptr: *mut c_void = core::ptr::null_mut();
         // SAFETY: `cname` is a valid NUL-terminated C string that outlives the call; `&mut ptr` is
@@ -439,8 +445,8 @@ mod tests {
     //! never load a DLL and inject the SDK root explicitly, so they do not touch the process
     //! environment.
 
-    use super::{interposer_path_from, resolve_existing_interposer};
     use super::StreamlineError;
+    use super::{interposer_path_from, resolve_existing_interposer};
     use std::ffi::OsString;
 
     #[test]

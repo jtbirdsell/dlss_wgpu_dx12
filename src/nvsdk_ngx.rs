@@ -193,20 +193,32 @@ pub fn check_ngx_result(result: NVSDK_NGX_Result) -> Result<(), DlssError> {
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_Success => return Ok(()),
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_FeatureNotSupported => FeatureNotSupported,
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_PlatformError => PlatformError,
-        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_FeatureAlreadyExists => FeatureAlreadyExists,
+        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_FeatureAlreadyExists => {
+            FeatureAlreadyExists
+        }
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_FeatureNotFound => FeatureNotFound,
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_InvalidParameter => InvalidParameters,
-        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_ScratchBufferTooSmall => ScratchBufferTooSmall,
+        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_ScratchBufferTooSmall => {
+            ScratchBufferTooSmall
+        }
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_NotInitialized => NotInitialized,
-        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnsupportedInputFormat => UnsupportedInputFormat,
+        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnsupportedInputFormat => {
+            UnsupportedInputFormat
+        }
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_RWFlagMissing => RWFlagMissing,
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_MissingInput => MissingInput,
-        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnableToInitializeFeature => UnableToInitializeFeature,
+        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnableToInitializeFeature => {
+            UnableToInitializeFeature
+        }
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_OutOfDate => OutOfDate,
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_OutOfGPUMemory => OutOfGPUMemory,
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnsupportedFormat => UnsupportedFormat,
-        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnableToWriteToAppDataPath => UnableToWriteToAppDataPath,
-        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnsupportedParameter => UnsupportedParameter,
+        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnableToWriteToAppDataPath => {
+            UnableToWriteToAppDataPath
+        }
+        r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_UnsupportedParameter => {
+            UnsupportedParameter
+        }
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_Denied => Denied,
         r if r == NVSDK_NGX_Result_NVSDK_NGX_Result_FAIL_NotImplemented => NotImplemented,
         // Never `unreachable!()` across FFI — surface the raw code.
@@ -296,7 +308,10 @@ mod tests {
         // never reach NGX's InFeatureCreateFlags; if as_flags stopped stripping it, NGX would get an
         // undefined flag and likely reject feature creation.
         let with_subrect = DlssFeatureFlags::AutoExposure | DlssFeatureFlags::OutputSubrect;
-        assert_eq!(with_subrect.as_flags(), DlssFeatureFlags::AutoExposure.as_flags());
+        assert_eq!(
+            with_subrect.as_flags(),
+            DlssFeatureFlags::AutoExposure.as_flags()
+        );
         // ...but it is still observable on the original flags (it drives InEnableOutputSubrects).
         assert!(with_subrect.contains(DlssFeatureFlags::OutputSubrect));
         // And bit 256 never leaks through as_flags for any combination.
