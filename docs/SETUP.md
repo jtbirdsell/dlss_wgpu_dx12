@@ -176,10 +176,15 @@ your executable. Copy these beside the built `.exe` (e.g. `target/debug/examples
 
 Without these, `slInit` / DLSS-G load fails and no frames are generated.
 
-In addition, Streamline expects its interposer to sit in front of the system DXGI/D3D12 so it can
-hook the swapchain path: stage a copy of `sl.interposer.dll` next to the exe **named `dxgi.dll` and
-`d3d12.dll`** (the loader-shim copies). These are distinct from the `$STREAMLINE_SDK/bin/x64`
-interposer the crate loads to resolve the `sl*` exports.
+> ⚠️ **Do NOT stage `dxgi.dll`/`d3d12.dll`.** Streamline documents an alternative "loader-shim"
+> interposition mode — copying `sl.interposer.dll` next to the exe as `dxgi.dll` and `d3d12.dll` so SL
+> fronts the *system* DXGI/D3D12. **This crate does not use that mode, and it is incompatible with
+> it.** The crate loads `sl.interposer.dll` explicitly and the wgpu fork upgrades its DXGI factory to
+> an SL proxy (the proxy path). If the loader-shims are *also* present, `slInit`'s `getSystemCaps`
+> enumerates adapters *through* the shim'd DXGI/D3D12, re-enters the interposer, and recurses until the
+> stack overflows — surfacing only as the opaque `eErrorExceptionHandler`. The crate now detects this
+> at load time and fails fast with a `StreamlineError::LoaderShimConflict` instead of crashing, but you
+> must simply **not** create those copies. (The hardware-proven recipe never staged them.)
 
 ```powershell
 $sl = "$env:STREAMLINE_SDK/bin/x64"
@@ -187,9 +192,9 @@ $dst = ".\target\debug\examples"
 foreach ($dll in 'sl.interposer.dll','sl.common.dll','sl.dlss_g.dll','sl.reflex.dll','sl.pcl.dll','nvngx_dlssg.dll') {
     Copy-Item "$sl/$dll" -Destination $dst
 }
-# Loader-shim copies so SL fronts the system DXGI/D3D12 swapchain path:
-Copy-Item "$sl/sl.interposer.dll" -Destination "$dst/dxgi.dll"
-Copy-Item "$sl/sl.interposer.dll" -Destination "$dst/d3d12.dll"
+# Do NOT copy sl.interposer.dll to dxgi.dll/d3d12.dll: this crate uses the interposer PROXY path, and
+# the loader-shims make slInit's getSystemCaps recurse and overflow the stack (the crate now rejects
+# them at load time as StreamlineError::LoaderShimConflict).
 ```
 
 ### 5.4 Signature verification of the interposer

@@ -1,9 +1,8 @@
 //! Authenticode signature verification for `sl.interposer.dll`.
 //!
 //! The spike intentionally loaded the interposer with **no** signature check. That is unacceptable
-//! for an enterprise integration: `sl.interposer.dll` is loaded into our process and is also copied
-//! next to the host executable as `dxgi.dll`/`d3d12.dll` (a classic DLL-hijack surface). Before we
-//! ever `LoadLibrary` it, we hard-gate on two checks:
+//! for an enterprise integration: `sl.interposer.dll` is loaded into our process from a path on disk
+//! (a classic DLL-hijack surface). Before we ever `LoadLibrary` it, we hard-gate on two checks:
 //!
 //!   1. **Trust** — [`WinVerifyTrust`] with `WINTRUST_ACTION_GENERIC_VERIFY_V2` validates the
 //!      embedded Authenticode signature and confirms its certificate chain terminates at a trusted
