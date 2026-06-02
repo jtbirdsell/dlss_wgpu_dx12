@@ -25,8 +25,14 @@ pub struct DlssSdk {
 }
 
 impl DlssSdk {
-    /// Initializes the NGX SDK against `device`'s underlying D3D12 device and verifies that DLSS
-    /// Super Resolution is available on this GPU + driver.
+    /// Initializes the NGX SDK against `device`'s underlying D3D12 device.
+    ///
+    /// With the default `super-resolution` feature this also verifies that DLSS Super Resolution is
+    /// available on this GPU + driver and returns [`DlssError::FeatureNotSupported`] if it is not, so
+    /// construction currently requires SR support. In an RR-only build
+    /// (`--no-default-features --features ray-reconstruction`) that SR-specific probe is skipped:
+    /// NGX is initialized and a `DlssRayReconstructionContext` primes its own feature state on
+    /// create.
     ///
     /// Returns [`DlssError::FeatureNotSupported`] if `device` is not a wgpu Dx12 device, or if the
     /// hardware/driver does not support DLSS — callers should then fall back to a plain device.
@@ -58,17 +64,26 @@ impl DlssSdk {
                 Some(Ok(())) => {}
             }
 
-            // Is DLSS Super Resolution actually supported by this hardware + driver?
-            let mut dlss_supported: i32 = 0;
-            let result = check_ngx_result(NVSDK_NGX_Parameter_GetI(
-                parameters,
-                NVSDK_NGX_Parameter_SuperSampling_Available.as_ptr().cast(),
-                &mut dlss_supported,
-            ));
-            if result.is_err() || dlss_supported == 0 {
-                let _ = check_ngx_result(NVSDK_NGX_D3D12_DestroyParameters(parameters));
-                result?;
-                return Err(DlssError::FeatureNotSupported);
+            // DLSS Super Resolution capability probe, gated on `super-resolution` (on by default).
+            // An RR-only build (`--no-default-features --features ray-reconstruction`) skips it, so
+            // it neither pays the dead SR probe nor is rejected on a (hypothetical, non-existent on
+            // NVIDIA hardware) SR-unavailable-but-RR-capable GPU. NGX is still initialized above with
+            // the SuperSampling FeatureID; RR primes its own feature state at create, so skipping
+            // this SR-only probe is sound.
+            #[cfg(feature = "super-resolution")]
+            {
+                // Is DLSS Super Resolution actually supported by this hardware + driver?
+                let mut dlss_supported: i32 = 0;
+                let result = check_ngx_result(NVSDK_NGX_Parameter_GetI(
+                    parameters,
+                    NVSDK_NGX_Parameter_SuperSampling_Available.as_ptr().cast(),
+                    &mut dlss_supported,
+                ));
+                if result.is_err() || dlss_supported == 0 {
+                    let _ = check_ngx_result(NVSDK_NGX_D3D12_DestroyParameters(parameters));
+                    result?;
+                    return Err(DlssError::FeatureNotSupported);
+                }
             }
 
             Ok(Arc::new(Mutex::new(Self { parameters, device })))

@@ -31,10 +31,11 @@
 
 use super::api::StreamlineApi;
 use super::ffi::SlApi;
-use super::tagging::{FgConstants, FgResources, dxgi_format_of};
+use super::tagging::{FgConstants, FgResources, MAX_FG_TAGS, dxgi_format_of};
 use super::types::*;
 use crate::hal;
 use core::ffi::c_void;
+use core::mem::MaybeUninit;
 use glam::UVec2;
 use std::cell::Cell;
 use std::ffi::CString;
@@ -601,16 +602,18 @@ impl Drop for FrameGenerationContext {
 }
 
 // SAFETY: the raw interposer fn-pointers and the per-frame token are `Copy` and are only ever read
-// (called) — never mutated through a shared alias — so moving the context (and its pointers) across
-// threads does not create a data race on the pointers themselves. Streamline serializes its own
-// process-global state internally, and this context holds the only owning handle to that state.
-// The remaining obligation is on the caller: the per-frame sequence (`begin_frame` and the [`Frame`]
-// methods) must NOT be driven from multiple threads concurrently. `begin_frame` takes `&mut self`,
-// which prevents two `Frame`s from coexisting, but it does not (and these impls do not claim to)
-// statically prevent moving a live `Frame` to another thread mid-sequence — that is the caller's
-// contract.
+// (called) — never mutated through a shared alias — so transferring sole ownership of the context
+// (and its pointers) to another thread cannot create a data race: after the move, only the new owner
+// can call any method. `Send` rests on that sole-ownership transfer alone, not on any claim about
+// Streamline's internal threading. The caller still owns the per-frame sequencing obligation:
+// `begin_frame` takes `&mut self` (so no two `Frame`s coexist), but `Send` does not statically
+// prevent moving a live `Frame` to another thread mid-sequence — that remains the caller's contract.
+//
+// `Sync` is intentionally NOT implemented. Sharing `&self` across threads would let `&self` methods
+// such as `query_state`/`is_enabled` issue concurrent FFI into Streamline's process-global state,
+// whose internal synchronization is asserted but unproven here; requiring exclusive (`&mut`) or
+// sole-owner access keeps every native call serialized through Rust's borrow rules.
 unsafe impl Send for FrameGenerationContext {}
-unsafe impl Sync for FrameGenerationContext {}
 
 /// The per-frame step the [`Frame`] is currently at, used for lightweight runtime order enforcement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -896,12 +899,16 @@ impl<'a> Frame<'a> {
         encoder: &mut wgpu::CommandEncoder,
         resources: &FgResources,
     ) -> Result<(), StreamlineError> {
-        let pairs = resources.tags();
+        let (pairs, len) = resources.tags();
+        let pairs = &pairs[..len];
 
-        // Build the `sl::Resource` payloads (one per tagged buffer); keep them alive until the call
-        // returns since the `ResourceTag`s point at them.
-        let mut sl_resources: Vec<Resource> = Vec::with_capacity(pairs.len());
-        for (res, _) in &pairs {
+        // Build the `sl::Resource` payloads (one per tagged buffer) into a stack array; they must
+        // outlive the slSetTagForFrame call since the `ResourceTag`s below point into this array.
+        // `Resource` is not `Copy`/`Default`, so we initialize the live prefix in place via
+        // `MaybeUninit`. `len <= MAX_FG_TAGS` (statically bounded by `FgResources::tags`).
+        let mut sl_resources: [MaybeUninit<Resource>; MAX_FG_TAGS] =
+            [const { MaybeUninit::uninit() }; MAX_FG_TAGS];
+        for (i, (res, _)) in pairs.iter().enumerate() {
             let native = match unsafe { hal::raw_resource(res.texture) } {
                 Some(p) => p.cast::<c_void>(),
                 None => {
@@ -913,7 +920,7 @@ impl<'a> Frame<'a> {
                 }
             };
             let dims: UVec2 = res.dimensions();
-            sl_resources.push(Resource::new_tex2d(
+            sl_resources[i].write(Resource::new_tex2d(
                 native,
                 res.resource_state,
                 dims.x,
@@ -922,22 +929,29 @@ impl<'a> Frame<'a> {
             ));
         }
 
-        // Build the tags pointing at the resources (parallel to `pairs`).
-        let mut tags: Vec<ResourceTag> = Vec::with_capacity(pairs.len());
+        // Build the tags pointing at the resources (parallel to `pairs`), also on the stack. Each
+        // tag's `resource` points into `sl_resources`, which lives to the end of this function (past
+        // the FFI call below), so the pointers stay valid for the duration of the tag.
+        let mut tags: [MaybeUninit<ResourceTag>; MAX_FG_TAGS] =
+            [const { MaybeUninit::uninit() }; MAX_FG_TAGS];
         for (i, (_, buffer_type)) in pairs.iter().enumerate() {
-            tags.push(ResourceTag::new(
-                &mut sl_resources[i] as *mut Resource,
+            // SAFETY: `sl_resources[i]` was initialized in the loop above (i < len).
+            let resource_ptr = sl_resources[i].as_mut_ptr();
+            tags[i].write(ResourceTag::new(
+                resource_ptr,
                 *buffer_type,
                 ResourceLifecycle::ValidUntilPresent,
             ));
         }
+        // SAFETY: the first `len` elements of `tags` were just initialized; this is the live slice.
+        let tags: &[ResourceTag] = unsafe { core::slice::from_raw_parts(tags[0].as_ptr(), len) };
 
         // Extract the encoder's open raw command list and run the orderable core (advance +
         // slSetTagForFrame) inside the borrow.
         // SAFETY: `with_raw_command_list` hands us the encoder's open raw `ID3D12GraphicsCommandList`
         // for the duration of the closure only; `tags` (with `sl_resources`) outlives the call.
         let r = unsafe {
-            hal::with_raw_command_list(encoder, |cmd_list| self.tag_core(&tags, cmd_list.cast()))
+            hal::with_raw_command_list(encoder, |cmd_list| self.tag_core(tags, cmd_list.cast()))
         };
         match r {
             Some(res) => res,

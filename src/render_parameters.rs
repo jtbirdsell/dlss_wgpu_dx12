@@ -81,31 +81,145 @@ impl<'a> DlssRenderParameters<'a> {
 
     /// Resource transitions to apply before evaluating: inputs must be shader-readable and the
     /// output must be a UAV. Routed through wgpu's tracker so it stays consistent with NGX's needs.
+    ///
+    /// The ordered set of slots (and thus the count) is decided by the device-free
+    /// [`barrier_slots`] helper, keeping the Manual-vs-Automatic and bias branch logic unit-testable
+    /// without a real `wgpu::Texture`; this method only attaches the matching texture to each slot.
     pub(crate) fn barrier_list(&self) -> impl Iterator<Item = TextureTransition<&'a Texture>> {
-        fn input<'a>(texture: &DlssTexture<'a>) -> TextureTransition<&'a Texture> {
-            TextureTransition {
-                texture: texture.texture,
+        let manual_exposure = matches!(self.exposure, DlssExposure::Manual { .. });
+        barrier_slots(manual_exposure, self.bias.is_some())
+            .into_iter()
+            .map(move |(slot, state)| TextureTransition {
+                texture: match slot {
+                    BarrierSlot::Color => self.color.texture,
+                    BarrierSlot::Depth => self.depth.texture,
+                    BarrierSlot::MotionVectors => self.motion_vectors.texture,
+                    BarrierSlot::Exposure => match &self.exposure {
+                        DlssExposure::Manual { exposure, .. } => exposure.texture,
+                        // `barrier_slots` only yields `Exposure` when `manual_exposure` is true.
+                        DlssExposure::Automatic => unreachable!(),
+                    },
+                    // `barrier_slots` only yields `Bias` when `self.bias.is_some()`.
+                    BarrierSlot::Bias => self.bias.as_ref().unwrap().texture,
+                    BarrierSlot::Output => self.dlss_output.texture,
+                },
                 selector: None,
-                state: TextureUses::RESOURCE,
-            }
-        }
+                state,
+            })
+    }
+}
 
-        [
-            Some(input(&self.color)),
-            Some(input(&self.depth)),
-            Some(input(&self.motion_vectors)),
-            match &self.exposure {
-                DlssExposure::Manual { exposure, .. } => Some(input(exposure)),
-                DlssExposure::Automatic => None,
-            },
-            self.bias.as_ref().map(input),
-            Some(TextureTransition {
-                texture: self.dlss_output.texture,
-                selector: None,
-                state: TextureUses::STORAGE_READ_WRITE,
-            }),
-        ]
-        .into_iter()
-        .flatten()
+/// Which [`DlssRenderParameters`] resource a barrier entry targets. Lets the barrier slot/order
+/// logic be decided over plain predicates (device-free, so unit-testable) by [`barrier_slots`], with
+/// the actual `wgpu::Texture` attached later by [`DlssRenderParameters::barrier_list`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BarrierSlot {
+    Color,
+    Depth,
+    MotionVectors,
+    Exposure,
+    Bias,
+    Output,
+}
+
+/// The ordered barrier slots + target states for an SR evaluation, as a pure function of whether
+/// exposure is Manual and whether a bias mask is present. Inputs become shader-readable
+/// (`RESOURCE`); the output becomes a UAV (`STORAGE_READ_WRITE`). The Manual exposure texture and
+/// the bias mask each add exactly one extra `RESOURCE` transition when present. This is the single
+/// source of truth for the barrier set and is exercised directly by the unit tests below.
+fn barrier_slots(manual_exposure: bool, has_bias: bool) -> Vec<(BarrierSlot, TextureUses)> {
+    let mut slots = vec![
+        (BarrierSlot::Color, TextureUses::RESOURCE),
+        (BarrierSlot::Depth, TextureUses::RESOURCE),
+        (BarrierSlot::MotionVectors, TextureUses::RESOURCE),
+    ];
+    if manual_exposure {
+        slots.push((BarrierSlot::Exposure, TextureUses::RESOURCE));
+    }
+    if has_bias {
+        slots.push((BarrierSlot::Bias, TextureUses::RESOURCE));
+    }
+    slots.push((BarrierSlot::Output, TextureUses::STORAGE_READ_WRITE));
+    slots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BarrierSlot, barrier_slots};
+    use wgpu::TextureUses;
+
+    // (a) Manual exposure adds exactly the exposure transition that Automatic omits; every other
+    // slot is identical.
+    #[test]
+    fn manual_exposure_adds_exposure_transition_vs_automatic() {
+        let automatic = barrier_slots(false, false);
+        let manual = barrier_slots(true, false);
+
+        assert_eq!(manual.len(), automatic.len() + 1);
+        assert!(
+            !automatic
+                .iter()
+                .any(|(slot, _)| *slot == BarrierSlot::Exposure)
+        );
+        assert_eq!(
+            manual
+                .iter()
+                .filter(|(slot, _)| *slot == BarrierSlot::Exposure)
+                .count(),
+            1
+        );
+        // The exposure texture is bound shader-readable, like the other inputs.
+        assert!(manual.contains(&(BarrierSlot::Exposure, TextureUses::RESOURCE)));
+        // Removing the exposure slot from the Manual set reproduces the Automatic set exactly
+        // (same slots, same states, same order).
+        let manual_without_exposure: Vec<_> = manual
+            .iter()
+            .copied()
+            .filter(|(slot, _)| *slot != BarrierSlot::Exposure)
+            .collect();
+        assert_eq!(manual_without_exposure, automatic);
+    }
+
+    // (b) Some(bias) adds exactly one more transition than None, independent of the exposure mode.
+    #[test]
+    fn bias_adds_exactly_one_transition() {
+        for &manual_exposure in &[false, true] {
+            let without_bias = barrier_slots(manual_exposure, false);
+            let with_bias = barrier_slots(manual_exposure, true);
+
+            assert_eq!(with_bias.len(), without_bias.len() + 1);
+            assert!(
+                !without_bias
+                    .iter()
+                    .any(|(slot, _)| *slot == BarrierSlot::Bias)
+            );
+            assert_eq!(
+                with_bias
+                    .iter()
+                    .filter(|(slot, _)| *slot == BarrierSlot::Bias)
+                    .count(),
+                1
+            );
+            assert!(with_bias.contains(&(BarrierSlot::Bias, TextureUses::RESOURCE)));
+        }
+    }
+
+    // Guard the full validated set: the output is always last and is the only UAV; everything else
+    // is shader-readable.
+    #[test]
+    fn output_is_last_and_only_uav() {
+        let slots = barrier_slots(true, true);
+        assert_eq!(
+            slots.last(),
+            Some(&(BarrierSlot::Output, TextureUses::STORAGE_READ_WRITE))
+        );
+        assert_eq!(
+            slots
+                .iter()
+                .filter(|(_, state)| *state == TextureUses::STORAGE_READ_WRITE)
+                .count(),
+            1
+        );
+        assert_eq!(slots.len(), 6); // color, depth, motion, exposure, bias, output
     }
 }

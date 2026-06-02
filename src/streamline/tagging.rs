@@ -12,6 +12,11 @@ use super::types::{
 };
 use glam::{UVec2, Vec2};
 
+/// The statically-proven maximum number of resources tagged for DLSS-G in one frame: depth +
+/// motion vectors (both always) + optional HUD-less color + optional UI layer. The per-frame
+/// tagging path is sized to this on the stack (no heap allocation); see [`FgResources::tags`].
+pub(crate) const MAX_FG_TAGS: usize = 4;
+
 /// `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE` — the proven default state for FG input textures.
 ///
 /// This is the state Streamline expects each tagged input to be in when it consumes the tag during
@@ -94,23 +99,43 @@ pub struct FgResources<'a> {
 impl<'a> FgResources<'a> {
     /// The `(FgResource, sl::BufferType)` pairs to tag this frame, in the spike's proven order:
     /// depth, motion vectors, then (if present) HUD-less color and UI.
-    pub(crate) fn tags(&self) -> Vec<(FgResource<'a>, BufferType)> {
+    pub(crate) fn tags(&self) -> ([(FgResource<'a>, BufferType); MAX_FG_TAGS], usize) {
         // Gather the tagged resources in the proven order (depth, motion vectors, optional HUD-less,
-        // optional UI), then zip them against [`tag_buffer_types`] — the pure ordering helper — so
-        // the type order has a single source of truth that is unit-tested without a device.
-        let mut resources: Vec<FgResource<'a>> = vec![self.depth, self.motion_vectors];
-        if let Some(hudless) = self.hudless_color {
-            resources.push(hudless);
-        }
-        match &self.ui {
-            Some(FgUi::ColorAndAlpha(r)) | Some(FgUi::Alpha(r)) => resources.push(*r),
-            None => {}
-        }
-        let types = tag_buffer_types(
+        // optional UI) into a stack array, zipping each against [`tag_buffer_types`] — the pure
+        // ordering helper, still the single source of truth for the type order. No heap allocation:
+        // the count is statically bounded by [`MAX_FG_TAGS`].
+        let (types, type_len) = tag_buffer_types(
             self.hudless_color.is_some(),
             self.ui.as_ref().map(UiTagKind::of),
         );
-        resources.into_iter().zip(types).collect()
+        // Resources in the SAME proven order the types were emitted in. Unused trailing slots are
+        // seeded with `depth` only to satisfy the non-`Default` array initializer; they are never
+        // read because every caller slices to the returned length.
+        let mut resources: [FgResource<'a>; MAX_FG_TAGS] =
+            [self.depth, self.motion_vectors, self.depth, self.depth];
+        let mut len = 2;
+        if let Some(hudless) = self.hudless_color {
+            resources[len] = hudless;
+            len += 1;
+        }
+        match &self.ui {
+            Some(FgUi::ColorAndAlpha(r)) | Some(FgUi::Alpha(r)) => {
+                resources[len] = *r;
+                len += 1;
+            }
+            None => {}
+        }
+        debug_assert_eq!(len, type_len, "FG resource/type counts diverged");
+        let mut pairs = [
+            (self.depth, types[0]),
+            (self.depth, types[0]),
+            (self.depth, types[0]),
+            (self.depth, types[0]),
+        ];
+        for i in 0..len {
+            pairs[i] = (resources[i], types[i]);
+        }
+        (pairs, len)
     }
 }
 
@@ -134,19 +159,30 @@ impl UiTagKind {
 /// The `sl::BufferType`s to tag this frame, in the spike's proven order: depth, motion vectors, then
 /// (if present) HUD-less color and the UI layer. Pure (no `wgpu`), so it is unit-tested directly;
 /// [`FgResources::tags`] zips its resources against this exact order.
-pub(crate) fn tag_buffer_types(has_hudless: bool, ui: Option<UiTagKind>) -> Vec<BufferType> {
-    let mut out = Vec::with_capacity(4);
-    out.push(K_BUFFER_TYPE_DEPTH);
-    out.push(K_BUFFER_TYPE_MOTION_VECTORS);
+pub(crate) fn tag_buffer_types(
+    has_hudless: bool,
+    ui: Option<UiTagKind>,
+) -> ([BufferType; MAX_FG_TAGS], usize) {
+    // Seeded with depth in every slot; the live prefix [0..len) is overwritten in proven order.
+    let mut out = [K_BUFFER_TYPE_DEPTH; MAX_FG_TAGS];
+    out[1] = K_BUFFER_TYPE_MOTION_VECTORS;
+    let mut len = 2;
     if has_hudless {
-        out.push(K_BUFFER_TYPE_HUD_LESS_COLOR);
+        out[len] = K_BUFFER_TYPE_HUD_LESS_COLOR;
+        len += 1;
     }
     match ui {
-        Some(UiTagKind::ColorAndAlpha) => out.push(K_BUFFER_TYPE_UI_COLOR_AND_ALPHA),
-        Some(UiTagKind::Alpha) => out.push(K_BUFFER_TYPE_UI_ALPHA),
+        Some(UiTagKind::ColorAndAlpha) => {
+            out[len] = K_BUFFER_TYPE_UI_COLOR_AND_ALPHA;
+            len += 1;
+        }
+        Some(UiTagKind::Alpha) => {
+            out[len] = K_BUFFER_TYPE_UI_ALPHA;
+            len += 1;
+        }
         None => {}
     }
-    out
+    (out, len)
 }
 
 /// Per-frame common constants handed to DLSS Frame Generation via `slSetConstants`.
@@ -410,7 +446,7 @@ pub(crate) fn dxgi_format_of(format: wgpu::TextureFormat) -> u32 {
 mod tests {
     use super::super::types::Boolean;
     use super::{
-        FgConstants, K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_HUD_LESS_COLOR,
+        BufferType, FgConstants, K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_HUD_LESS_COLOR,
         K_BUFFER_TYPE_MOTION_VECTORS, K_BUFFER_TYPE_UI_ALPHA, K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
         UiTagKind, dxgi_format_of, tag_buffer_types,
     };
@@ -483,12 +519,17 @@ mod tests {
 
     #[test]
     fn tag_buffer_types_orders_depth_mvec_then_optionals() {
+        // Compare the initialized prefix of the returned fixed array (len) against the proven order.
+        fn types(has_hudless: bool, ui: Option<UiTagKind>) -> Vec<BufferType> {
+            let (out, len) = tag_buffer_types(has_hudless, ui);
+            out[..len].to_vec()
+        }
         assert_eq!(
-            tag_buffer_types(false, None),
+            types(false, None),
             vec![K_BUFFER_TYPE_DEPTH, K_BUFFER_TYPE_MOTION_VECTORS]
         );
         assert_eq!(
-            tag_buffer_types(true, None),
+            types(true, None),
             vec![
                 K_BUFFER_TYPE_DEPTH,
                 K_BUFFER_TYPE_MOTION_VECTORS,
@@ -496,7 +537,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            tag_buffer_types(true, Some(UiTagKind::ColorAndAlpha)),
+            types(true, Some(UiTagKind::ColorAndAlpha)),
             vec![
                 K_BUFFER_TYPE_DEPTH,
                 K_BUFFER_TYPE_MOTION_VECTORS,
@@ -505,7 +546,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            tag_buffer_types(true, Some(UiTagKind::Alpha)),
+            types(true, Some(UiTagKind::Alpha)),
             vec![
                 K_BUFFER_TYPE_DEPTH,
                 K_BUFFER_TYPE_MOTION_VECTORS,
@@ -515,7 +556,7 @@ mod tests {
         );
         // The two optionals are independent: UI present without HUD-less.
         assert_eq!(
-            tag_buffer_types(false, Some(UiTagKind::Alpha)),
+            types(false, Some(UiTagKind::Alpha)),
             vec![
                 K_BUFFER_TYPE_DEPTH,
                 K_BUFFER_TYPE_MOTION_VECTORS,

@@ -26,6 +26,7 @@ compile_error!(
     "dlss_wgpu_dx12 supports Windows + the wgpu Dx12 backend only; use dlss_wgpu (Vulkan) on other platforms."
 );
 
+mod config;
 mod context;
 mod feature_info;
 mod hal;
@@ -41,13 +42,14 @@ mod sdk;
 #[cfg(feature = "frame-generation")]
 mod streamline;
 
+#[cfg(feature = "ray-reconstruction")]
+pub use config::{DepthType, RoughnessMode};
+pub use config::{DlssFeatureFlags, DlssPerfQualityMode};
 pub use context::DlssContext;
 pub use instance::{DEFAULT_DXC_PATH, dxc_instance_descriptor, dxc_instance_descriptor_at};
-pub use nvsdk_ngx::{DlssError, DlssFeatureFlags, DlssPerfQualityMode};
+pub use nvsdk_ngx::DlssError;
 #[cfg(feature = "ray-reconstruction")]
-pub use ray_reconstruction::{
-    DepthType, DlssRayReconstructionContext, DlssRayReconstructionParameters, RoughnessMode,
-};
+pub use ray_reconstruction::{DlssRayReconstructionContext, DlssRayReconstructionParameters};
 pub use render_parameters::{DlssExposure, DlssRenderParameters, DlssTexture};
 pub use sdk::DlssSdk;
 #[cfg(feature = "frame-generation")]

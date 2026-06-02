@@ -4,8 +4,8 @@
 //! [`DlssRayReconstructionContext`] for a given upscale pass, never both.
 
 use crate::{
-    DlssError, DlssFeatureFlags, DlssPerfQualityMode, DlssSdk, DlssTexture,
-    ngx_feature::NgxFeature, nvsdk_ngx::*,
+    DepthType, DlssError, DlssFeatureFlags, DlssPerfQualityMode, DlssSdk, DlssTexture,
+    RoughnessMode, ngx_feature::NgxFeature, nvsdk_ngx::*,
 };
 use glam::{UVec2, Vec2};
 use std::{
@@ -14,26 +14,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use wgpu::{TextureTransition, TextureUses};
-
-/// How roughness is supplied to Ray Reconstruction.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum RoughnessMode {
-    /// Roughness is a dedicated input texture.
-    #[default]
-    Unpacked,
-    /// Roughness is packed into the `.w` channel of the normals texture.
-    Packed,
-}
-
-/// How depth is supplied to Ray Reconstruction.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum DepthType {
-    /// Linear view-space depth (RR's preferred input).
-    Linear,
-    /// Hardware (post-projection) depth, as in a standard depth buffer.
-    #[default]
-    Hardware,
-}
 
 /// Inputs and output for a Ray Reconstruction evaluation. All guide buffers are at render
 /// resolution; `output` is at the upscaled resolution and must be UAV-capable.

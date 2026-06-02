@@ -18,16 +18,23 @@
 //!      `REVOCATION-CHECK-SKIPPED` warning for SIEM. A genuinely revoked certificate stays a hard
 //!      failure.
 //!
-//!   2. **Signer identity (best-effort)** — we then crack the embedded PKCS#7 with
+//!   2. **Signer identity (fail-closed)** — we then crack the embedded PKCS#7 with
 //!      [`CryptQueryObject`], pull the signer's leaf certificate, and require its subject common
 //!      name to contain "NVIDIA". This raises the bar from "signed by *someone* Windows trusts" to
-//!      "signed by NVIDIA specifically". It is best-effort: a query/parse failure after trust has
-//!      already passed is logged and treated as a soft pass (the WinVerifyTrust gate above is the
-//!      hard requirement), but a *successfully parsed* non-NVIDIA subject is a hard
-//!      [`StreamlineError::UntrustedSigner`].
+//!      "signed by NVIDIA specifically". A *successfully parsed* non-NVIDIA subject is always a hard
+//!      [`StreamlineError::UntrustedSigner`]. A query/parse *failure* after trust has already passed
+//!      is, **by default, also a hard failure** ([`StreamlineError::SignatureVerificationFailed`]):
+//!      if we cannot positively confirm the signer is NVIDIA we refuse to load. Setting
+//!      `STREAMLINE_ALLOW_UNVERIFIED_SIGNER=1` opts out of that default and degrades a *parse
+//!      failure* (only) back to a logged soft pass that rides on the WinVerifyTrust gate alone; a
+//!      parseable non-NVIDIA subject is still rejected regardless. The deprecated
+//!      `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1` is now redundant (fail-closed is the default) but is
+//!      still honored: it re-asserts the hard gate and overrides a stray
+//!      `STREAMLINE_ALLOW_UNVERIFIED_SIGNER=1`.
 //!
 //! Verification level achieved: full chain-to-trusted-root validation (hard gate) plus signer
-//! subject-name pinning to NVIDIA (hard gate when the subject is parseable; soft when it is not).
+//! subject-name pinning to NVIDIA (hard gate; a parse failure is also hard-failed by default, and
+//! only soft-passes when explicitly opted out via `STREAMLINE_ALLOW_UNVERIFIED_SIGNER=1`).
 
 use super::types::StreamlineError;
 use std::path::Path;
@@ -68,9 +75,18 @@ const REVOCATION_OFFLINE_HRESULTS: [u32; 3] = [0x800B_010E, 0x8009_2013, 0x8009_
 /// The signer-name substring we pin the interposer to (case-insensitive compare).
 const REQUIRED_SIGNER_SUBSTR: &str = "NVIDIA";
 
-/// Environment variable that, when set to `"1"`, promotes the NVIDIA signer pin from best-effort to
-/// a hard gate: a parse failure (soft-pass) or a non-NVIDIA subject becomes an `Err` instead of a
-/// warning. For high-assurance deployments that refuse to run an unverifiable signer.
+/// Environment variable that, when set to `"1"`, opts OUT of the fail-closed default: a signer
+/// *parse failure* after the trust gate has already passed degrades to a logged soft pass instead of
+/// a hard `Err`. (A parseable, non-NVIDIA subject is rejected regardless.) Off by default, so the
+/// default posture is fail-closed: we refuse to load unless the signer is positively confirmed to be
+/// NVIDIA. Overridden by [`REQUIRE_NVIDIA_SIGNER_ENV`] when both are set.
+const ALLOW_UNVERIFIED_SIGNER_ENV: &str = "STREAMLINE_ALLOW_UNVERIFIED_SIGNER";
+
+/// **Deprecated / redundant.** Historically this var (`="1"`) promoted the signer pin from
+/// best-effort to a hard gate. Fail-closed is now the *default*, so this is no longer required. It
+/// is still honored for compatibility and as an explicit guard: when set to `"1"` it re-asserts the
+/// hard gate and **overrides** a stray [`ALLOW_UNVERIFIED_SIGNER_ENV`]`=1`, so a deployment that
+/// hard-pins cannot be silently relaxed by also setting the opt-out.
 const REQUIRE_NVIDIA_SIGNER_ENV: &str = "STREAMLINE_REQUIRE_NVIDIA_SIGNER";
 
 /// Verify that `path` is an Authenticode-signed binary whose certificate chain terminates at a
@@ -218,19 +234,20 @@ fn verify_trust_once(
     status
 }
 
-/// Step 2 (best-effort hard gate): crack the embedded PKCS#7, pull the signer leaf certificate, and
+/// Step 2 (hard gate, fail-closed): crack the embedded PKCS#7, pull the signer leaf certificate, and
 /// require its subject to contain "NVIDIA".
 ///
-/// A failure to *parse* the signature after the trust gate already passed is logged loudly (with a
-/// `SIGNER-PIN-SKIPPED` SIEM token) and treated as a soft pass — trust is the load-bearing gate. A
-/// successfully parsed non-NVIDIA subject is always a hard [`StreamlineError::UntrustedSigner`].
+/// A successfully parsed non-NVIDIA subject is always a hard [`StreamlineError::UntrustedSigner`].
+/// A failure to *parse* the signature after the trust gate already passed is, **by default, also a
+/// hard failure** ([`StreamlineError::SignatureVerificationFailed`]): if we cannot positively
+/// confirm the signer is NVIDIA we refuse to load (logged with a `SIGNER-PIN-FAILED` SIEM token).
 ///
-/// When the `STREAMLINE_REQUIRE_NVIDIA_SIGNER` environment variable is set to `"1"`, the soft pass
-/// is **promoted to a hard failure** ([`StreamlineError::SignatureVerificationFailed`]): a
-/// high-assurance deployment refuses to load an interposer whose signer it cannot positively
-/// confirm to be NVIDIA.
+/// Setting `STREAMLINE_ALLOW_UNVERIFIED_SIGNER=1` opts out of the fail-closed default and degrades a
+/// *parse failure* (only) back to a logged soft pass (`SIGNER-PIN-SKIPPED`) that rides on the
+/// WinVerifyTrust gate alone. The deprecated `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1` re-asserts the
+/// hard gate and overrides a stray opt-out.
 fn verify_signer_is_nvidia(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
-    let require_nvidia = signer_pin_is_required();
+    let allow_unverified = unverified_signer_allowed();
     match extract_signer_subject(wide_path) {
         Ok(subject) => {
             if subject
@@ -243,48 +260,59 @@ fn verify_signer_is_nvidia(path: &Path, wide_path: &[u16]) -> Result<(), Streaml
                 Ok(())
             } else {
                 // A parseable, non-NVIDIA subject is always a hard failure (independent of the env
-                // var) — see the function doc.
+                // vars) — see the function doc.
                 Err(StreamlineError::UntrustedSigner(subject))
             }
         }
         Err(detail) => {
-            // Trust already passed; we just could not parse the subject.
-            if require_nvidia {
-                log::error!(
-                    "SIGNER-PIN-SKIPPED: sl.interposer.dll passed WinVerifyTrust but its signer \
-                     subject could not be extracted for NVIDIA pinning ('{}'): {detail}. \
-                     {REQUIRE_NVIDIA_SIGNER_ENV}=1 — refusing to load.",
-                    path.display()
-                );
-                Err(StreamlineError::SignatureVerificationFailed(format!(
-                    "could not confirm the signer is NVIDIA ({REQUIRE_NVIDIA_SIGNER_ENV}=1 requires \
-                     a positively-parsed NVIDIA signer): {detail}"
-                )))
-            } else {
+            // Trust already passed; we just could not parse the subject. Fail closed by default.
+            if allow_unverified {
                 log::warn!(
                     "SIGNER-PIN-SKIPPED: sl.interposer.dll passed WinVerifyTrust but its signer \
                      subject could not be extracted for NVIDIA pinning ('{}'): {detail}. \
-                     Proceeding on the trust gate only (set {REQUIRE_NVIDIA_SIGNER_ENV}=1 to make \
-                     this a hard failure).",
+                     {ALLOW_UNVERIFIED_SIGNER_ENV}=1 — proceeding on the trust gate only (UNSAFE: \
+                     the signer is NOT confirmed to be NVIDIA).",
                     path.display()
                 );
                 Ok(())
+            } else {
+                log::error!(
+                    "SIGNER-PIN-FAILED: sl.interposer.dll passed WinVerifyTrust but its signer \
+                     subject could not be extracted for NVIDIA pinning ('{}'): {detail}. \
+                     Refusing to load (fail-closed default; set {ALLOW_UNVERIFIED_SIGNER_ENV}=1 to \
+                     proceed on the trust gate alone).",
+                    path.display()
+                );
+                Err(StreamlineError::SignatureVerificationFailed(format!(
+                    "could not confirm the signer is NVIDIA (fail-closed default; set \
+                     {ALLOW_UNVERIFIED_SIGNER_ENV}=1 to allow an unverifiable signer): {detail}"
+                )))
             }
         }
     }
 }
 
-/// Whether the NVIDIA signer pin is configured as a hard requirement via
-/// `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1`.
-fn signer_pin_is_required() -> bool {
-    signer_pin_required_from(std::env::var_os(REQUIRE_NVIDIA_SIGNER_ENV))
+/// Whether a signer that could not be parsed/confirmed as NVIDIA is *allowed* to load (the opt-out
+/// from the fail-closed default), per the `STREAMLINE_ALLOW_UNVERIFIED_SIGNER` /
+/// `STREAMLINE_REQUIRE_NVIDIA_SIGNER` env vars.
+fn unverified_signer_allowed() -> bool {
+    unverified_signer_allowed_from(
+        std::env::var_os(ALLOW_UNVERIFIED_SIGNER_ENV),
+        std::env::var_os(REQUIRE_NVIDIA_SIGNER_ENV),
+    )
 }
 
-/// Pure form of [`signer_pin_is_required`]: the pin is promoted to a hard requirement only when the
-/// env value is exactly `"1"`. Split out so the policy is unit-testable without mutating the
-/// process environment.
-fn signer_pin_required_from(value: Option<std::ffi::OsString>) -> bool {
-    value.is_some_and(|v| v == "1")
+/// Pure form of [`unverified_signer_allowed`]: an unverifiable signer is allowed only when the
+/// opt-out `allow` value is exactly `"1"` AND the deprecated `require` guard is NOT exactly `"1"`
+/// (an explicit `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1` re-asserts the hard gate and vetoes the
+/// opt-out). Split out so the policy is unit-testable without mutating the process environment.
+fn unverified_signer_allowed_from(
+    allow: Option<std::ffi::OsString>,
+    require: Option<std::ffi::OsString>,
+) -> bool {
+    let allow = allow.is_some_and(|v| v == "1");
+    let require = require.is_some_and(|v| v == "1");
+    allow && !require
 }
 
 /// Crack the embedded PKCS#7 signature on `wide_path` and return the signer leaf certificate's
@@ -451,17 +479,37 @@ mod tests {
     //! Headless tests for the signature hard-gate. These run real Win32 `WinVerifyTrust` against
     //! files on disk — no GPU and no Streamline SDK required, so they run on a Windows CI runner.
 
-    use super::{StreamlineError, signer_pin_required_from, verify_interposer_signature};
+    use super::{StreamlineError, unverified_signer_allowed_from, verify_interposer_signature};
     use std::ffi::OsString;
     use std::io::Write;
 
     #[test]
-    fn signer_pin_required_only_when_env_is_exactly_one() {
-        assert!(signer_pin_required_from(Some(OsString::from("1"))));
-        assert!(!signer_pin_required_from(Some(OsString::from("0"))));
-        assert!(!signer_pin_required_from(Some(OsString::from("true"))));
-        assert!(!signer_pin_required_from(Some(OsString::from(""))));
-        assert!(!signer_pin_required_from(None));
+    fn unverified_signer_disallowed_by_default_and_allowed_only_on_explicit_opt_out() {
+        let one = || Some(OsString::from("1"));
+        // Fail-closed by default: nothing set => not allowed.
+        assert!(!unverified_signer_allowed_from(None, None));
+        // Opt-out alone, exactly "1" => allowed.
+        assert!(unverified_signer_allowed_from(one(), None));
+        // Opt-out must be exactly "1".
+        assert!(!unverified_signer_allowed_from(
+            Some(OsString::from("0")),
+            None
+        ));
+        assert!(!unverified_signer_allowed_from(
+            Some(OsString::from("true")),
+            None
+        ));
+        assert!(!unverified_signer_allowed_from(
+            Some(OsString::from("")),
+            None
+        ));
+        // Deprecated REQUIRE=1 re-asserts the hard gate and vetoes a stray opt-out.
+        assert!(!unverified_signer_allowed_from(one(), one()));
+        // A non-"1" REQUIRE value does not veto the opt-out.
+        assert!(unverified_signer_allowed_from(
+            one(),
+            Some(OsString::from("0"))
+        ));
     }
 
     #[test]
