@@ -34,6 +34,10 @@ windows = { version = "0.62", default-features = false, features = [
     # Frame Generation (Streamline): detect a loaded sl.interposer.dll + verify its signature.
     "Win32_System_LibraryLoader",
     "Win32_Security_WinTrust",
+    # L10: open the interposer ONCE (CreateFileW, FILE_SHARE_READ only) and hold that handle across
+    # both WinVerifyTrust (via WINTRUST_FILE_INFO.hFile) and Library::new, to narrow the verify->load
+    # swap window. Provides CreateFileW / FILE_SHARE_READ / OPEN_EXISTING / FILE_ATTRIBUTE_NORMAL.
+    "Win32_Storage_FileSystem",
     # WINTRUST_DATA / WINTRUST_DATA_0 (and their Default impls) are gated behind the Cryptography
     # feature; it also provides CryptQueryObject / CryptMsgGetParam / CertGetNameStringW used to
     # pin the interposer's signer subject to "NVIDIA" in src/streamline/security.rs.

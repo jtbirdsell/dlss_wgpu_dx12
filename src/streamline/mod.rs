@@ -8,8 +8,20 @@
 //! fork, rev `d81d755`), so wgpu's own swapchain becomes the SL proxy that drives DLSS-G.
 //!
 //! This module is the safe, enterprise wrapper around that flow. It was distilled from a hardware-
-//! validated spike (RTX 4090: `numFramesActuallyPresented == 2`). The non-obvious runtime
-//! requirements that the spike proved are load-bearing and are enforced / documented here:
+//! validated spike (RTX 4090: `numFramesActuallyPresented == 2`).
+//!
+//! Security note (sibling-DLL surface): before `slInit`, the loader Authenticode-verifies and
+//! NVIDIA-pins the interposer AND every known sibling SL plugin present where the loader resolves
+//! them — the exe directory (searched first) and the interposer's own dir (`sl.common`, `sl.dlss_g`,
+//! `sl.reflex`, `sl.pcl`, `nvngx_dlssg`). This does NOT fully close the DLL-hijack surface: the
+//! interposer must locate its plugins via the DEFAULT search order (constraining it makes `slInit`
+//! fail with `eErrorNoPlugins`), so an attacker-renamed/unknown DLL on the search path — or the
+//! `dxgi.dll`/`d3d12.dll` loader-shims beside the exe — is NOT covered. Deployments MUST keep
+//! `$STREAMLINE_SDK/bin/x64` and the exe directory on ACL-restricted storage writable only by an
+//! administrator. See [`ffi::SlApi::load`].
+//!
+//! The non-obvious runtime requirements that the spike proved are load-bearing and are enforced /
+//! documented here:
 //!   1. The presented window MUST be visible + foreground/composited, or DLSS-G silently declines
 //!      to present generated frames.
 //!   2. The host MUST call `IDXGISwapChain3::GetCurrentBackBufferIndex()` every frame (wgpu never
