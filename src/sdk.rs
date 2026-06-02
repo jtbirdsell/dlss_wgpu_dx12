@@ -79,7 +79,9 @@ impl DlssSdk {
                     NVSDK_NGX_Parameter_SuperSampling_Available.as_ptr().cast(),
                     &mut dlss_supported,
                 ));
-                if result.is_err() || dlss_supported == 0 {
+                // Factor the pure supported/unsupported decision out (unit-tested below without a
+                // device); the NGX cleanup + error propagation below are unchanged.
+                if !sr_capability_supported(result.is_ok(), dlss_supported) {
                     let _ = check_ngx_result(NVSDK_NGX_D3D12_DestroyParameters(parameters));
                     result?;
                     return Err(DlssError::FeatureNotSupported);
@@ -111,7 +113,50 @@ impl Drop for DlssSdk {
     }
 }
 
+/// Pure decision for the DLSS Super Resolution capability probe in [`DlssSdk::new`], factored out so
+/// the supported/unsupported branch is unit-assertable without a real NGX device. SR is supported
+/// iff the capability query itself succeeded (`probe_ok`) *and* NGX reported a non-zero availability
+/// flag (`dlss_supported`). A failed query (`!probe_ok`) or a zero flag both mean "not supported"; the
+/// caller then destroys the parameter block and returns [`DlssError::FeatureNotSupported`].
+#[cfg(feature = "super-resolution")]
+pub(crate) fn sr_capability_supported(probe_ok: bool, dlss_supported: i32) -> bool {
+    probe_ok && dlss_supported != 0
+}
+
 // SAFETY: the raw `parameters` pointer is only ever touched while the owning `Mutex` is held, and
 // NGX tolerates use from a single thread at a time. The wgpu `Device` is itself `Send + Sync`.
 unsafe impl Send for DlssSdk {}
 unsafe impl Sync for DlssSdk {}
+
+#[cfg(all(test, feature = "super-resolution"))]
+mod tests {
+    use super::sr_capability_supported;
+
+    #[test]
+    fn sr_capability_decision_truth_table() {
+        // Supported ONLY when the capability query succeeded AND NGX reports a non-zero flag.
+        assert!(
+            sr_capability_supported(true, 1),
+            "probe ok + non-zero availability flag must report SR supported"
+        );
+        assert!(
+            sr_capability_supported(true, i32::MAX),
+            "any non-zero availability flag counts as supported"
+        );
+        // A zero availability flag means unsupported even though the query itself succeeded — this is
+        // the non-RTX / unsupported-driver branch that previously had zero off-hardware coverage.
+        assert!(
+            !sr_capability_supported(true, 0),
+            "probe ok but zero availability flag must report SR unsupported"
+        );
+        // A failed capability query is unsupported regardless of whatever was left in the out-param.
+        assert!(
+            !sr_capability_supported(false, 0),
+            "failed probe must report unsupported"
+        );
+        assert!(
+            !sr_capability_supported(false, 1),
+            "a failed probe must report unsupported even if the stale out-param looks non-zero"
+        );
+    }
+}

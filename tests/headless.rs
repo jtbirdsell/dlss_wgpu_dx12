@@ -847,3 +847,102 @@ fn dlss_dlaa_renders_at_output_resolution() {
     assert_eq!(*range.end(), upscaled);
     eprintln!("DLAA render_resolution == {upscaled:?} (output); range is degenerate");
 }
+
+/// Hardware / local-only: create and drop TWO Super Resolution contexts (and, under
+/// `ray-reconstruction`, one Ray Reconstruction context) that all SHARE one `Arc<Mutex<DlssSdk>>`,
+/// then drop the SDK last, asserting nothing panics. This is the only automated test that exercises
+/// the documented teardown ordering on hardware: every `DlssContext` / `DlssRayReconstructionContext`
+/// must be dropped (its NGX feature released under the SDK `Mutex`) *before* the last
+/// `Arc<Mutex<DlssSdk>>` clone is dropped (which idles the GPU and runs NGX `DestroyParameters` +
+/// `Shutdown1`). It also smoke-tests the `Send`/`Sync` contract: the SDK is shared across contexts via
+/// `Arc::clone`. Both context constructors take the `Arc` by value, so each gets its own clone.
+#[test]
+#[ignore = "hardware/local test: needs an NVIDIA RTX GPU + DLSS SDK; CI has no GPU"]
+fn multi_context_shared_sdk_teardown_does_not_panic() {
+    use dlss_wgpu_dx12::{DlssContext, DlssFeatureFlags, DlssPerfQualityMode};
+    use glam::UVec2;
+
+    let _guard = hardware_test_guard();
+    if !stage_ngx_dll("nvngx_dlss.dll") {
+        return;
+    }
+    let Some((device, queue)) = request_nvidia_dx12_device() else {
+        return;
+    };
+
+    let sdk = match DlssSdk::new(uuid::Uuid::new_v4(), device.clone()) {
+        Ok(sdk) => sdk,
+        Err(DlssError::FeatureNotSupported) => {
+            eprintln!("skipping: DLSS not supported on this device");
+            return;
+        }
+        Err(e) => panic!("DlssSdk::new must be Ok or FeatureNotSupported, got: {e}"),
+    };
+
+    let upscaled = UVec2::new(1920, 1080);
+
+    // Two SR contexts sharing the one SDK (each constructor consumes its own Arc clone).
+    let ctx_a = DlssContext::new(
+        upscaled,
+        DlssPerfQualityMode::Quality,
+        DlssFeatureFlags::AutoExposure,
+        std::sync::Arc::clone(&sdk),
+        &device,
+        &queue,
+    )
+    .expect("first shared-SDK SR context should create");
+    let ctx_b = DlssContext::new(
+        upscaled,
+        DlssPerfQualityMode::Balanced,
+        DlssFeatureFlags::AutoExposure,
+        std::sync::Arc::clone(&sdk),
+        &device,
+        &queue,
+    )
+    .expect("second shared-SDK SR context should create");
+    eprintln!("created two SR contexts sharing one DlssSdk");
+
+    // Under ray-reconstruction, also bind an RR context to the SAME SDK (RR primes its own feature
+    // state on create; the SR-built SDK is the shared NGX instance). Staged separately because RR
+    // uses a different NGX model DLL.
+    #[cfg(feature = "ray-reconstruction")]
+    let rr = {
+        use dlss_wgpu_dx12::{DepthType, DlssRayReconstructionContext, RoughnessMode};
+        if stage_ngx_dll("nvngx_dlssd.dll") {
+            match DlssRayReconstructionContext::new(
+                upscaled,
+                DlssPerfQualityMode::Quality,
+                RoughnessMode::Packed,
+                DepthType::Hardware,
+                DlssFeatureFlags::empty(),
+                std::sync::Arc::clone(&sdk),
+                &device,
+                &queue,
+            ) {
+                Ok(rr) => {
+                    eprintln!("also bound a Ray Reconstruction context to the shared DlssSdk");
+                    Some(rr)
+                }
+                Err(DlssError::FeatureNotSupported) => {
+                    eprintln!("RR not supported on this device; SR-only teardown still exercised");
+                    None
+                }
+                Err(e) => panic!("RR context new must be Ok or FeatureNotSupported, got: {e}"),
+            }
+        } else {
+            None
+        }
+    };
+
+    // Documented drop order: drop every context FIRST (each releases its NGX feature under the SDK
+    // Mutex while other clones keep the SDK alive), THEN drop the last Arc clone (which idles the GPU
+    // and shuts NGX down for the device). Make the order explicit rather than relying on declaration
+    // order, and assert the whole sequence is panic-free.
+    #[cfg(feature = "ray-reconstruction")]
+    drop(rr);
+    drop(ctx_b);
+    drop(ctx_a);
+    drop(sdk); // last Arc<Mutex<DlssSdk>> clone -> DlssSdk::drop (device idle + NGX shutdown)
+
+    eprintln!("multi-context shared-SDK teardown completed without panic");
+}
