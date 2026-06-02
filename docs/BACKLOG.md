@@ -24,15 +24,16 @@ docs-api-ergonomics 5 · performance-resources 3.
 
 ## Progress
 
-**31 of 39 done.** Completed (with the PR that landed them):
+**34 of 39 done.** Completed (with the PR that landed them):
 
 - **High:** H1 ✅ #9 · H2 ✅ #10
 - **Medium:** M1 ✅ #9 · M2 ✅ #9 · M3 ✅ (resolved by H1 + M5) · M4 ✅ #11 · M5 ✅ #13 · M6 ✅ #16 · M7 ✅ #14 · M9 ✅ #12 · M10 ✅ #15 · M11 ✅ #12
-- **Low:** L1 ✅ #10 · L2 ✅ #9 · L3 ✅ #11 · L4 ✅ #11 · L8 ✅ #10 · L11 ✅ #16 · L13 ✅ #9 · L14 ✅ #10 · L15 ✅ #15 · L16 ✅ #12 · L17 ✅ #12 · L18 ✅ #11 · L19 ✅ #11 · L20 ✅ #10 · L21 ✅ #10 · L23 ✅ #15 · L24 ✅ #15
+- **Low:** L1 ✅ #10 · L2 ✅ #9 · L3 ✅ #11 · L4 ✅ #11 · L7 ✅ #17 · L8 ✅ #10 · L9 ✅ #17 · L11 ✅ #16 · L13 ✅ #9 · L14 ✅ #10 · L15 ✅ #15 · L16 ✅ #12 · L17 ✅ #12 · L18 ✅ #11 · L19 ✅ #11 · L20 ✅ #10 · L21 ✅ #10 · L22 ✅ #17 · L23 ✅ #15 · L24 ✅ #15
 - **Nit:** N1 ✅ #15 · N2 ✅ #15
-- **Partial:** L22 — `rustfmt.toml` + `cargo fmt --all --check` gate landed in #14 (with M7); `.editorconfig` in #10. Still open: `rust-version` (MSRV) + `rust-toolchain.toml` + an MSRV-pinned CI job.
 
-Remaining work (8), grouped: policy — L9 (docs.rs), L22 MSRV remainder; security depth — M8, L10; tests — L5–L7; performance — L12. The security-depth (M8, L10) and L12 items touch the validated FFI loader / per-frame hot path, so they warrant closer review or a hardware re-run; L5/L6 are partly hardware-gated. (Items below are not individually re-marked; cross-reference this list.)
+Notes: **L9** is resolved by *documenting* that docs.rs is intentionally unsupported (NGX bindings derive from non-redistributable NVIDIA headers absent on docs.rs, and a git `wgpu` dep blocks publishing) with local-build instructions — a functional docs.rs build is not achievable, so no scaffolding was added. **L22** MSRV is **1.87** (verified: 1.85/1.86 fail on wgpu-types 29.0.3; a single FG let-chain that would have forced 1.88 was rewritten to a match-guard).
+
+Remaining work (5) — all touch the validated FFI loader / per-frame hot path or need the RTX 4090, so they are being implemented as PRs **held for hardware validation** (not merged): security depth — M8, L10; tests — L5, L6; performance — L12.
 
 ---
 
