@@ -201,14 +201,17 @@ Before it is ever `LoadLibrary`'d, `sl.interposer.dll` is hard-gated on two chec
    confirms its certificate chain terminates at a trusted root — the same check Windows applies when
    you double-click a signed binary. Unsigned, tampered, expired-chain, or untrusted binaries are
    refused, and the crate will not load the DLL.
-2. **Signer identity (NVIDIA pinning):** the crate then cracks the embedded PKCS#7, pulls the
-   signer's leaf certificate, and requires its subject common name to contain "NVIDIA". A
+2. **Signer identity (NVIDIA pinning, fail-closed):** the crate then cracks the embedded PKCS#7,
+   pulls the signer's leaf certificate, and requires its subject common name to contain "NVIDIA". A
    successfully parsed **non-NVIDIA** subject is a hard failure (`StreamlineError::UntrustedSigner`).
-   This step is best-effort only in one direction: if the subject *cannot be parsed* after the trust
-   gate has already passed, it is logged (a loud `SIGNER-PIN-SKIPPED` audit line) and treated as a
-   soft pass (the `WinVerifyTrust` trust gate is the load-bearing requirement). For high-assurance
-   deployments, set `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1` to promote that parse-failure soft pass to a
-   hard failure, so the DLL loads only when the NVIDIA signer is positively confirmed.
+   If the subject *cannot be parsed* after the trust gate has already passed, the crate **fails
+   closed by default** (a hard `StreamlineError::SignatureVerificationFailed`, logged as a
+   `SIGNER-PIN-FAILED` audit line): the DLL loads only when the NVIDIA signer is positively
+   confirmed. To opt out — degrading a *parse failure* (only) back to a logged `SIGNER-PIN-SKIPPED`
+   soft pass that rides on the `WinVerifyTrust` trust gate alone — set
+   `STREAMLINE_ALLOW_UNVERIFIED_SIGNER=1`. (The older `STREAMLINE_REQUIRE_NVIDIA_SIGNER=1` is now
+   redundant since fail-closed is the default; it is still honored and, when set, re-asserts the hard
+   gate and overrides a stray `STREAMLINE_ALLOW_UNVERIFIED_SIGNER=1`.)
 
 The trust gate also checks **revocation** across the whole certificate chain
 (`WTD_REVOKE_WHOLECHAIN`); if the revocation servers are unreachable the check degrades to offline
