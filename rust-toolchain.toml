@@ -1,0 +1,10 @@
+# Development toolchain for contributors and CI: the current stable channel with the components this
+# repo's checks need (rustfmt for `cargo fmt --check`, clippy for the `-D warnings` gate), so everyone
+# formats and lints identically without per-machine component drift.
+#
+# This is NOT the crate's minimum supported Rust version. The MSRV floor is `rust-version` in
+# Cargo.toml and is enforced separately by the `msrv` CI job, which selects that exact older toolchain
+# explicitly (an env override) so this file does not mask an accidental MSRV bump.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

@@ -170,4 +170,31 @@ mod tests {
     }
 
     // `DlssPerfQualityMode`/`DlssFeatureFlags` and their unit tests moved to `crate::config`.
+
+    #[test]
+    fn bindgen_blocklist_excludes_d3d11_and_cuda() {
+        // build.rs blocklists D3D11/D3d11/Cuda/CUDA so the static-inline thunks never pull in
+        // <d3d11.h>/<cuda.h> at compile time. If a blocklist pattern silently stopped matching (e.g.
+        // an NGX header rename), the thunks would fail to compile with an opaque libclang error far
+        // from here. Guard it: read the generated bindings and assert the excluded surfaces stayed
+        // out while the D3D12 surface we depend on stayed in.
+        let bindings = include_str!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+        assert!(
+            !bindings.contains("D3D11"),
+            "a D3D11 symbol leaked past the build.rs blocklist"
+        );
+        assert!(
+            !bindings.contains("D3d11"),
+            "a D3d11 (lowercase-d setter) symbol leaked past the build.rs blocklist"
+        );
+        assert!(
+            !bindings.contains("Cuda") && !bindings.contains("CUDA"),
+            "a CUDA symbol leaked past the build.rs blocklist"
+        );
+        // Sanity: the D3D12 surface the crate actually needs is still generated.
+        assert!(
+            bindings.contains("D3D12"),
+            "expected the D3D12 NGX bindings to be present"
+        );
+    }
 }

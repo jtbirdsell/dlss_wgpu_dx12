@@ -2,6 +2,10 @@
 name = "dlss_wgpu_dx12"
 version = "0.1.0"
 edition = "2024"
+# Minimum supported Rust version. Verified by building the full locked graph on 1.87.0 (1.85/1.86
+# fail: wgpu-types 29.0.3 requires rustc 1.87). Enforced by the `msrv` CI job. Bump deliberately when
+# a dependency raises its own floor. `edition = "2024"` itself needs >= 1.85.
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 description = "NVIDIA DLSS (Super Resolution, Ray Reconstruction, Frame Generation) for wgpu's DX12 backend"
 repository = "https://github.com/jtbirdsell/dlss_wgpu_dx12"
