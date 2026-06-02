@@ -14,6 +14,12 @@
 //! See the README for full instructions.
 
 #![deny(missing_docs)]
+// Public-item docs occasionally link to internal (`pub(crate)`/private-module) items via
+// convenience paths like `self`/`super::...` — handy for `cargo doc --document-private-items`
+// locally. The crate is not published to docs.rs (its NGX bindings derive from non-redistributable
+// NVIDIA headers, and docs.rs has no SDK), so these never render to a public page; allow them while
+// still denying genuinely-broken links (the default under `-D warnings`) via the CI doc gate.
+#![allow(rustdoc::private_intra_doc_links)]
 
 #[cfg(not(windows))]
 compile_error!(
@@ -46,7 +52,7 @@ pub use render_parameters::{DlssExposure, DlssRenderParameters, DlssTexture};
 pub use sdk::DlssSdk;
 #[cfg(feature = "frame-generation")]
 pub use streamline::{
-    DEFAULT_ENGINE_VERSION, DEFAULT_PROJECT_ID, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, DEFAULT_ENGINE_VERSION, DEFAULT_PROJECT_ID,
     FgConstants, FgResource, FgResources, FgUi, Frame, FrameGenerationContext, FrameGenerationMode,
     FrameGenerationOptions, FrameGenerationState, Streamline, StreamlineError,
 };

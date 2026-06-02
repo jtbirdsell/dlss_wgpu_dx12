@@ -32,15 +32,15 @@
 use super::types::StreamlineError;
 use std::path::Path;
 
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Security::Cryptography::{
     CERT_CONTEXT, CERT_FIND_SUBJECT_CERT, CERT_INFO, CERT_NAME_SIMPLE_DISPLAY_TYPE,
     CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED, CERT_QUERY_ENCODING_TYPE,
-    CERT_QUERY_FORMAT_FLAG_BINARY, CERT_QUERY_OBJECT_FILE, CMSG_SIGNER_INFO, CMSG_SIGNER_INFO_PARAM,
-    CertCloseStore, CertFindCertificateInStore, CertFreeCertificateContext, CertGetNameStringW,
-    CryptMsgClose, CryptMsgGetParam, CryptQueryObject, HCERTSTORE, PKCS_7_ASN_ENCODING,
-    X509_ASN_ENCODING,
+    CERT_QUERY_FORMAT_FLAG_BINARY, CERT_QUERY_OBJECT_FILE, CMSG_SIGNER_INFO,
+    CMSG_SIGNER_INFO_PARAM, CertCloseStore, CertFindCertificateInStore, CertFreeCertificateContext,
+    CertGetNameStringW, CryptMsgClose, CryptMsgGetParam, CryptQueryObject, HCERTSTORE,
+    PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
 };
-use windows::Win32::Foundation::HWND;
 use windows::Win32::Security::WinTrust::{
     WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
     WINTRUST_DATA_REVOCATION_CHECKS, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
@@ -325,7 +325,14 @@ fn extract_signer_subject(wide_path: &[u16]) -> Result<String, String> {
     }
     // SAFETY: `h_store` was produced by CryptQueryObject above. Released exactly once here.
     unsafe {
-        let _ = CertCloseStore(if h_store.is_invalid() { None } else { Some(h_store) }, 0);
+        let _ = CertCloseStore(
+            if h_store.is_invalid() {
+                None
+            } else {
+                Some(h_store)
+            },
+            0,
+        );
     }
 
     result
@@ -372,7 +379,8 @@ fn extract_subject_from_handles(
     // with `read_unaligned` rather than forming a reference to a possibly-misaligned address (which
     // is UB even if the later field reads happen to work). The copied Issuer/SerialNumber blobs'
     // `pbData` pointers still point into `buffer`, which outlives the find call below.
-    let signer_info = unsafe { core::ptr::read_unaligned(buffer.as_ptr() as *const CMSG_SIGNER_INFO) };
+    let signer_info =
+        unsafe { core::ptr::read_unaligned(buffer.as_ptr() as *const CMSG_SIGNER_INFO) };
 
     // 3. Build a CERT_INFO carrying only Issuer + SerialNumber, as CERT_FIND_SUBJECT_CERT expects.
     let mut find_info = CERT_INFO {
@@ -412,15 +420,7 @@ fn extract_subject_from_handles(
 fn read_subject_name(cert_ctx: *const CERT_CONTEXT) -> Result<String, String> {
     // First call (psznamestring = None) returns the required length in chars (incl. NUL).
     // SAFETY: `cert_ctx` is a valid certificate context. Length-query form passes a null buffer.
-    let len = unsafe {
-        CertGetNameStringW(
-            cert_ctx,
-            CERT_NAME_SIMPLE_DISPLAY_TYPE,
-            0,
-            None,
-            None,
-        )
-    };
+    let len = unsafe { CertGetNameStringW(cert_ctx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, None) };
     if len <= 1 {
         // 1 == just the NUL terminator (empty name).
         return Err("certificate has an empty subject name".to_string());
@@ -451,7 +451,7 @@ mod tests {
     //! Headless tests for the signature hard-gate. These run real Win32 `WinVerifyTrust` against
     //! files on disk — no GPU and no Streamline SDK required, so they run on a Windows CI runner.
 
-    use super::{signer_pin_required_from, verify_interposer_signature, StreamlineError};
+    use super::{StreamlineError, signer_pin_required_from, verify_interposer_signature};
     use std::ffi::OsString;
     use std::io::Write;
 

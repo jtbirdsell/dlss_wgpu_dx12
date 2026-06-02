@@ -1,0 +1,6 @@
+# Formatting policy for the crate. Kept minimal: canonical rustfmt defaults so contributors get
+# the same result from any editor/CI without surprising overrides. `edition` is pinned so a
+# standalone `rustfmt` (not invoked through Cargo) still parses 2024-edition syntax.
+#
+# CI enforces this via `cargo fmt --all --check` in the `lint` job (see .github/workflows/ci.yml).
+edition = "2024"

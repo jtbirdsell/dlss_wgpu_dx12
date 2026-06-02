@@ -31,7 +31,7 @@
 
 use super::api::StreamlineApi;
 use super::ffi::SlApi;
-use super::tagging::{dxgi_format_of, FgConstants, FgResources};
+use super::tagging::{FgConstants, FgResources, dxgi_format_of};
 use super::types::*;
 use crate::hal;
 use core::ffi::c_void;
@@ -101,10 +101,11 @@ impl Streamline {
             function: "slInit (project_id contained an interior NUL)".to_string(),
             result: SlResult::ErrorInvalidParameter,
         })?;
-        let engine_version_c = CString::new(engine_version).map_err(|_| StreamlineError::SlCall {
-            function: "slInit (engine_version contained an interior NUL)".to_string(),
-            result: SlResult::ErrorInvalidParameter,
-        })?;
+        let engine_version_c =
+            CString::new(engine_version).map_err(|_| StreamlineError::SlCall {
+                function: "slInit (engine_version contained an interior NUL)".to_string(),
+                result: SlResult::ErrorInvalidParameter,
+            })?;
 
         // DLSS-G needs all three features loaded: DLSS-G itself, Reflex (mandatory dependency), and
         // PCL (the latency markers). Order matches the spike.
@@ -183,7 +184,7 @@ pub struct FrameGenerationOptions {
     /// [`super::tagging::FgUi`] is still *supported* (the tag is accepted) but recomposition is off.
     pub enable_ui_recomposition: bool,
     /// DXGI numeric format of the UI buffer, used only when [`Self::enable_ui_recomposition`] is
-    /// `true`. Set it via [`Self::with_ui_format`]; if `None`, SL infers it (0).
+    /// `true`. Set it via [`Self::with_ui_recomposition`]; if `None`, SL infers it (0).
     pub ui_format: Option<u32>,
 }
 
@@ -743,7 +744,10 @@ impl<'a> Frame<'a> {
     fn acquire_core(&self) {
         self.advance(Step::Constants, Step::Acquired);
         // SAFETY: `self.token` is this frame's live token; PCL marker is best-effort.
-        unsafe { self.api.set_marker(PCLMarker::RenderSubmitStart, self.token) };
+        unsafe {
+            self.api
+                .set_marker(PCLMarker::RenderSubmitStart, self.token)
+        };
     }
 
     /// The orderable core of [`Self::tag`]: advance the step and call `slSetTagForFrame` with an
@@ -807,7 +811,10 @@ impl<'a> Frame<'a> {
         // SAFETY: `sl_consts` is a fully-initialized `sl::Constants` on the stack through the call;
         // `self.token` is this frame's live token; `&self.viewport` is valid; `set_constants`
         // forwards to the resolved interposer export.
-        let r = unsafe { self.api.set_constants(&sl_consts, self.token, &self.viewport) };
+        let r = unsafe {
+            self.api
+                .set_constants(&sl_consts, self.token, &self.viewport)
+        };
         if r.is_ok() {
             Ok(())
         } else {
@@ -1225,7 +1232,11 @@ mod tests {
         buffer_types
             .iter()
             .map(|&bt| {
-                ResourceTag::new(core::ptr::null_mut(), bt, ResourceLifecycle::ValidUntilPresent)
+                ResourceTag::new(
+                    core::ptr::null_mut(),
+                    bt,
+                    ResourceLifecycle::ValidUntilPresent,
+                )
             })
             .collect()
     }
@@ -1319,7 +1330,9 @@ mod tests {
             K_BUFFER_TYPE_HUD_LESS_COLOR,
             K_BUFFER_TYPE_UI_COLOR_AND_ALPHA,
         ];
-        frame.tag_core(&make_tags(&order), dummy_cmd_list()).unwrap();
+        frame
+            .tag_core(&make_tags(&order), dummy_cmd_list())
+            .unwrap();
         assert!(mock.calls().contains(&Call::SetTagForFrame {
             buffer_types: order.to_vec()
         }));
@@ -1463,7 +1476,10 @@ mod tests {
         };
         let st = query_state_with(&mock, &ViewportHandle::new(0), DLSSGMode::On, 1).unwrap();
         assert!(!st.is_ok);
-        assert!(st.status_text.contains("eFailGetCurrentBackBufferIndexNotCalled"));
+        assert!(
+            st.status_text
+                .contains("eFailGetCurrentBackBufferIndexNotCalled")
+        );
     }
 
     #[test]
@@ -1558,8 +1574,9 @@ mod tests {
         let mock = MockApi::default();
         let r = mock.reflex_set_options(ReflexMode::LowLatency).unwrap();
         assert!(r.is_ok());
-        assert!(mock
-            .calls()
-            .contains(&Call::ReflexSetOptions(ReflexMode::LowLatency)));
+        assert!(
+            mock.calls()
+                .contains(&Call::ReflexSetOptions(ReflexMode::LowLatency))
+        );
     }
 }

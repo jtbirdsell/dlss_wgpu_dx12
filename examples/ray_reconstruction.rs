@@ -105,13 +105,55 @@ fn run() -> Result<(), DlssError> {
 
     // Render-resolution guide buffers. A real path tracer would write these; here they are cleared.
     let input = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
-    let color = target(&device, "rr_color", render_resolution, TextureFormat::Rgba16Float, input);
-    let diffuse_albedo = target(&device, "rr_diffuse", render_resolution, TextureFormat::Rgba16Float, input);
-    let specular_albedo = target(&device, "rr_specular", render_resolution, TextureFormat::Rgba16Float, input);
-    let normals = target(&device, "rr_normals", render_resolution, TextureFormat::Rgba16Float, input);
-    let roughness = target(&device, "rr_roughness", render_resolution, TextureFormat::R16Float, input);
-    let depth = target(&device, "rr_depth", render_resolution, TextureFormat::R32Float, input);
-    let motion_vectors = target(&device, "rr_motion", render_resolution, TextureFormat::Rg16Float, input);
+    let color = target(
+        &device,
+        "rr_color",
+        render_resolution,
+        TextureFormat::Rgba16Float,
+        input,
+    );
+    let diffuse_albedo = target(
+        &device,
+        "rr_diffuse",
+        render_resolution,
+        TextureFormat::Rgba16Float,
+        input,
+    );
+    let specular_albedo = target(
+        &device,
+        "rr_specular",
+        render_resolution,
+        TextureFormat::Rgba16Float,
+        input,
+    );
+    let normals = target(
+        &device,
+        "rr_normals",
+        render_resolution,
+        TextureFormat::Rgba16Float,
+        input,
+    );
+    let roughness = target(
+        &device,
+        "rr_roughness",
+        render_resolution,
+        TextureFormat::R16Float,
+        input,
+    );
+    let depth = target(
+        &device,
+        "rr_depth",
+        render_resolution,
+        TextureFormat::R32Float,
+        input,
+    );
+    let motion_vectors = target(
+        &device,
+        "rr_motion",
+        render_resolution,
+        TextureFormat::Rg16Float,
+        input,
+    );
     let output = target(
         &device,
         "rr_output",
@@ -128,7 +170,15 @@ fn run() -> Result<(), DlssError> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dlss_rr_inputs"),
         });
-        for tex in [&color, &diffuse_albedo, &specular_albedo, &normals, &roughness, &depth, &motion_vectors] {
+        for tex in [
+            &color,
+            &diffuse_albedo,
+            &specular_albedo,
+            &normals,
+            &roughness,
+            &depth,
+            &motion_vectors,
+        ] {
             clear(&mut encoder, tex, Color::BLACK);
         }
         queue.submit([encoder.finish()]);
@@ -136,12 +186,20 @@ fn run() -> Result<(), DlssError> {
         context.render(
             DlssRayReconstructionParameters {
                 color: DlssTexture { texture: &color },
-                diffuse_albedo: DlssTexture { texture: &diffuse_albedo },
-                specular_albedo: DlssTexture { texture: &specular_albedo },
+                diffuse_albedo: DlssTexture {
+                    texture: &diffuse_albedo,
+                },
+                specular_albedo: DlssTexture {
+                    texture: &specular_albedo,
+                },
                 normals: DlssTexture { texture: &normals },
-                roughness: DlssTexture { texture: &roughness },
+                roughness: DlssTexture {
+                    texture: &roughness,
+                },
                 depth: DlssTexture { texture: &depth },
-                motion_vectors: DlssTexture { texture: &motion_vectors },
+                motion_vectors: DlssTexture {
+                    texture: &motion_vectors,
+                },
                 output: DlssTexture { texture: &output },
                 reset: frame_number == 0,
                 jitter_offset,

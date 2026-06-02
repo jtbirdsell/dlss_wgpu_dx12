@@ -28,7 +28,11 @@ fn main() {
         .unwrap_or(false);
     // nvsdk_ngx_d.lib expects the dynamic CRT (/MD, the default); nvsdk_ngx_s.lib the static CRT
     // (/MT). A mismatch is an opaque LNK2038, so select by the crt-static target feature.
-    let ngx_lib = if crt_static { "nvsdk_ngx_s" } else { "nvsdk_ngx_d" };
+    let ngx_lib = if crt_static {
+        "nvsdk_ngx_s"
+    } else {
+        "nvsdk_ngx_d"
+    };
     let ngx_lib_path = PathBuf::from(&lib_dir).join(format!("{ngx_lib}.lib"));
     assert!(
         ngx_lib_path.exists(),
@@ -41,7 +45,9 @@ fn main() {
     // paths, COM, shell, version info). rlibs aren't linked, so these only surface when an
     // executable (test/example/bin) links the crate. Link them explicitly — e.g. NGX's
     // RegOpenKeyExW/RegCloseKey/RegQueryValueExW resolve from advapi32.
-    for system_lib in ["advapi32", "user32", "shell32", "ole32", "oleaut32", "version"] {
+    for system_lib in [
+        "advapi32", "user32", "shell32", "ole32", "oleaut32", "version",
+    ] {
         println!("cargo:rustc-link-lib=dylib={system_lib}");
     }
 

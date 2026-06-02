@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// NGX is **not** thread-safe, so every NGX call is serialized behind the `Mutex`.
 ///
 /// **Drop order matters:** drop all [`crate::DlssContext`] /
-/// [`crate::DlssRayReconstructionContext`] instances (and submit any command encoder you passed to
+/// `DlssRayReconstructionContext` instances (and submit any command encoder you passed to
 /// their `new`/`render`) *before* the last `Arc<Mutex<DlssSdk>>` clone is dropped. The SDK's `Drop`
 /// waits for the GPU to idle, then destroys the NGX parameters and shuts NGX down for the device;
 /// releasing it while feature handles are still live is unsupported.

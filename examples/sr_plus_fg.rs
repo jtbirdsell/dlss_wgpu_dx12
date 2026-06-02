@@ -367,7 +367,9 @@ impl GpuState {
         // -----------------------------------------------------------------------------------------
         let fg_options = FrameGenerationOptions::enabled().with_color_format(surface_format);
         let fg = FrameGenerationContext::new(streamline, &device, &adapter, &fg_options)?;
-        println!("DLSS-G enabled (mode On, numFramesToGenerate=1, color_format from {surface_format:?})");
+        println!(
+            "DLSS-G enabled (mode On, numFramesToGenerate=1, color_format from {surface_format:?})"
+        );
 
         // NOW create the swapchain (SL's device registration is in place).
         surface.configure(&device, &config);
@@ -1051,12 +1053,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
