@@ -40,6 +40,43 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
+  # Enforce the declared MSRV (Cargo.toml `rust-version`). The crate is Windows-only and bindgen's
+  # build.rs must run, so this compiles the full graph on the exact MSRV toolchain. RUSTUP_TOOLCHAIN
+  # overrides the repo's rust-toolchain.toml (which pins `stable`) so this job genuinely builds on
+  # 1.87.0 and would catch a dependency/edition bump that raises the real floor.
+  msrv:
+    name: msrv (1.87.0, windows)
+    runs-on: windows-2025-vs2026
+    env:
+      RUSTUP_TOOLCHAIN: "1.87.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust 1.87.0 (declared MSRV)
+        uses: dtolnay/rust-toolchain@1.87.0
+
+      - name: Install LLVM (libclang, for bindgen)
+        run: choco install llvm --no-progress -y
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clone DLSS SDK (pinned)
+        run: git clone --depth 1 --branch v310.6.0 https://github.com/NVIDIA/DLSS.git "$env:RUNNER_TEMP\dlss_sdk"
+
+      # `cargo check` (not build) is enough to prove the graph type-checks on the MSRV; run the
+      # default + both feature sets since feature-gated code can use newer APIs.
+      - name: cargo check on MSRV
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          cargo check
+          cargo check --features ray-reconstruction
+          cargo check --features frame-generation
+
   windows:
     name: check / clippy / build (windows)
     # Target the VS2026-based image directly to avoid the in-progress 2025 -> 2025-vs2026 redirect.
@@ -118,6 +155,19 @@ jobs:
           cargo check
           cargo check --no-default-features
           cargo check --features debug_overlay
+
+      # build.rs selects the static-CRT NGX import lib (nvsdk_ngx_s.lib) and compiles the inline
+      # thunks with /MT when the `crt-static` target feature is set; every other CI step links the
+      # dynamic CRT (nvsdk_ngx_d.lib, /MD). A CRT-selection regression there is an opaque LNK2038 at
+      # link time, so exercise the static path end-to-end by building the test binaries (which link
+      # the NGX lib) with +crt-static. (Separate RUSTFLAGS → its own rust-cache entry; expected.)
+      - name: cargo build --tests (+crt-static)
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --tests
 
       # Doc-warning gate: this crate is doc-heavy and `#![deny(missing_docs)]`, so a broken
       # intra-doc link or a missing doc would otherwise ship silently. `RUSTDOCFLAGS=-D warnings`

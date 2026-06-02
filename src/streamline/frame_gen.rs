@@ -587,10 +587,14 @@ impl Drop for FrameGenerationContext {
         opts.mode = DLSSGMode::Off;
         // SAFETY: `opts`/`&self.viewport` are valid; the trait impl forwards to the resolved feature
         // fn. `Err` (feature fn never resolved) means there is nothing to disable — swallow it.
-        if let Ok(r) = unsafe { self.api.dlssg_set_options(&self.viewport, &opts) }
-            && !r.is_ok()
-        {
-            log::error!("slDLSSGSetOptions(eOff) during drop returned {r:?}");
+        // A `match` with a guard rather than an `if let ... && ...` let-chain keeps the FG feature on
+        // the same 1.87 MSRV as the rest of the crate (let-chains only stabilized in Rust 1.88), while
+        // staying clippy-clean (a nested `if` would trip `collapsible_if`).
+        match unsafe { self.api.dlssg_set_options(&self.viewport, &opts) } {
+            Ok(r) if !r.is_ok() => {
+                log::error!("slDLSSGSetOptions(eOff) during drop returned {r:?}");
+            }
+            _ => {}
         }
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         // SAFETY: `shutdown` forwards to the resolved interposer export; slInit succeeded.
