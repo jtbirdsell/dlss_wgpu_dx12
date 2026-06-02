@@ -1,0 +1,264 @@
+diff --git a/wgpu-hal/Cargo.toml b/wgpu-hal/Cargo.toml
+index 3026526..8ee6e58 100644
+--- a/wgpu-hal/Cargo.toml
++++ b/wgpu-hal/Cargo.toml
+@@ -159,6 +159,7 @@ dx12 = [
+     "windows/Win32_Security",
+     "windows/Win32_System_Diagnostics_Debug",
+     "windows/Win32_System_Kernel",
++    "windows/Win32_System_LibraryLoader",
+     "windows/Win32_System_Performance",
+     "windows/Win32_System_Threading",
+     "windows/Win32_UI_WindowsAndMessaging",
+diff --git a/wgpu-hal/src/dx12/instance.rs b/wgpu-hal/src/dx12/instance.rs
+index 6c3a33b..9a76258 100644
+--- a/wgpu-hal/src/dx12/instance.rs
++++ b/wgpu-hal/src/dx12/instance.rs
+@@ -26,7 +26,14 @@ impl crate::Instance for super::Instance {
+ 
+         device_factory.enable_debug_layer(&lib_main, desc.flags);
+ 
+-        let (lib_dxgi, factory) = auxil::dxgi::factory::create_factory(desc.flags)?;
++        let (lib_dxgi, mut factory) = auxil::dxgi::factory::create_factory(desc.flags)?;
++
++        // If NVIDIA Streamline's interposer is already loaded in this process (e.g. the host called
++        // `slInit` before creating the wgpu Instance), upgrade this factory in place to an SL proxy
++        // so the swapchains it creates — and their `Present` — are SL proxies that drive DLSS Frame
++        // Generation. This is a runtime-guarded no-op when the interposer is not loaded, so stock
++        // wgpu is completely unaffected. See `super::streamline`.
++        unsafe { super::streamline::upgrade_factory(&mut factory) };
+ 
+         // Create IDXGIFactoryMedia
+         let factory_media = lib_dxgi.create_factory_media().ok();
+diff --git a/wgpu-hal/src/dx12/mod.rs b/wgpu-hal/src/dx12/mod.rs
+index 36f0e0d..0431ad3 100644
+--- a/wgpu-hal/src/dx12/mod.rs
++++ b/wgpu-hal/src/dx12/mod.rs
+@@ -83,6 +83,7 @@ mod instance;
+ mod pipeline_desc;
+ mod sampler;
+ mod shader_compilation;
++mod streamline;
+ mod suballocation;
+ mod types;
+ mod view;
+diff --git a/wgpu-hal/src/dx12/streamline.rs b/wgpu-hal/src/dx12/streamline.rs
+new file mode 100644
+index 0000000..2c55121
+--- /dev/null
++++ b/wgpu-hal/src/dx12/streamline.rs
+@@ -0,0 +1,214 @@
++//! Optional, self-activating NVIDIA Streamline interception for the DX12 backend.
++//!
++//! NVIDIA Streamline (SL) drives features such as DLSS Frame Generation from *inside* an
++//! SL-proxied `IDXGISwapChain::Present`. For that to do anything, the swapchain whose `Present`
++//! wgpu calls must be an SL proxy. wgpu builds its swapchain from its own `IDXGIFactory` (see
++//! [`super::Surface::configure`] -> `CreateSwapChainForHwnd`), so SL's global hooks never attach
++//! to it on their own.
++//!
++//! The fix is to call SL's `slUpgradeInterface` on the factory wgpu uses, *immediately after the
++//! factory is created*, so every swapchain that factory creates (and thus its `Present`) is an SL
++//! proxy. SL documents `slUpgradeInterface` for exactly this "manual hooking" scenario.
++//!
++//! This is gated entirely at *runtime*: we only do anything if `sl.interposer.dll` is already
++//! loaded into the process (checked via `GetModuleHandleW`). For normal wgpu use — where the SL
++//! interposer is not present — every function here is a no-op and there is zero behavior change.
++//! This keeps the integration self-activating without plumbing a cargo feature through
++//! wgpu-hal / wgpu-core / wgpu.
++//!
++//! Only compiled on `cfg(windows)` as part of the dx12 backend.
++
++use core::ffi::c_void;
++
++use windows::{
++    core::Interface,
++    Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
++};
++
++use crate::auxil::dxgi::factory::DxgiFactory;
++
++/// `sl::Result` is a 4-byte `enum class` with `eOk == 0`. We only care whether the call succeeded.
++const SL_RESULT_OK: i32 = 0;
++
++/// `PFun_slUpgradeInterface = sl::Result(void** baseInterface)` (sl_core_api.h:66, :275).
++///
++/// `extern "C"` (the SL core exports are undecorated `extern "C"`; see sl_core_api.h `SL_API`).
++type PfnSlUpgradeInterface = unsafe extern "C" fn(base_interface: *mut *mut c_void) -> i32;
++
++/// UTF-16, NUL-terminated `L"sl.interposer.dll"` for `GetModuleHandleW`.
++///
++/// We build the wide string explicitly rather than using the `w!` macro so this does not depend on
++/// the `windows`/`windows-strings` macro re-export surface (which differs across versions).
++const INTERPOSER_NAME_W: &[u16] = &[
++    b's' as u16, b'l' as u16, b'.' as u16, b'i' as u16, b'n' as u16, b't' as u16, b'e' as u16,
++    b'r' as u16, b'p' as u16, b'o' as u16, b's' as u16, b'e' as u16, b'r' as u16, b'.' as u16,
++    b'd' as u16, b'l' as u16, b'l' as u16, 0,
++];
++
++/// ANSI, NUL-terminated `b"slUpgradeInterface\0"` for `GetProcAddress`.
++const SL_UPGRADE_INTERFACE_SYM: &[u8] = b"slUpgradeInterface\0";
++
++/// Resolve `slUpgradeInterface` from the already-loaded `sl.interposer.dll`, or `None` if the
++/// interposer is not loaded in this process (the normal, non-Streamline case).
++///
++/// Uses `GetModuleHandleW` (NOT `LoadLibrary`): we never load the interposer ourselves. We only
++/// piggy-back on it if the host application (e.g. via `slInit`) already loaded it before wgpu
++/// created its DXGI factory.
++unsafe fn resolve_upgrade_interface() -> Option<PfnSlUpgradeInterface> {
++    // SAFETY: PCWSTR over a 'static NUL-terminated UTF-16 buffer. GetModuleHandleW does not take
++    // ownership and returns Err if the module is not loaded (no AddRef on the module either).
++    let hmodule = unsafe { GetModuleHandleW(windows::core::PCWSTR(INTERPOSER_NAME_W.as_ptr())) };
++    let hmodule = match hmodule {
++        Ok(h) if !h.is_invalid() => h,
++        // Interposer not loaded -> nothing to do (stock wgpu path).
++        _ => return None,
++    };
++
++    // SAFETY: PCSTR over a 'static NUL-terminated byte string.
++    let proc = unsafe {
++        GetProcAddress(
++            hmodule,
++            windows::core::PCSTR(SL_UPGRADE_INTERFACE_SYM.as_ptr()),
++        )
++    };
++    let proc = match proc {
++        Some(p) => p,
++        None => {
++            log::warn!(
++                "streamline: sl.interposer.dll is loaded but slUpgradeInterface was not found; \
++                 leaving the DXGI factory un-upgraded"
++            );
++            return None;
++        }
++    };
++
++    // FARPROC is `unsafe extern "system" fn() -> isize`; transmute to the real C signature.
++    // SAFETY: the symbol resolved is SL's slUpgradeInterface, whose ABI we mirror in
++    // `PfnSlUpgradeInterface`.
++    Some(unsafe { core::mem::transmute::<unsafe extern "system" fn() -> isize, PfnSlUpgradeInterface>(proc) })
++}
++
++/// If `sl.interposer.dll` is loaded, replace `*iface` with a Streamline proxy via
++/// `slUpgradeInterface`. No-op otherwise (zero behavior change for stock wgpu).
++///
++/// # Ownership / refcount semantics (the load-bearing FFI detail)
++///
++/// `slUpgradeInterface(void** baseInterface)` is documented (sl_core_api.h:264-275) as:
++///
++/// > Upgrade interface
++/// > Use this method to upgrade basic D3D or DXGI interface to an SL proxy.
++/// > @param baseInterface Pointer to a pointer to the base interface (for example ID3D12Device
++/// >   etc.) **to be replaced in place.**
++/// > IMPORTANT: This method should ONLY be used to support 3rd party SDKs ... or when using
++/// >   manual hooking. ... should be called IMMEDIATELY after base interface is created.
++///
++/// "Replaced in place" means SL writes the proxy pointer back into the `void*` we hand it. SL's
++/// proxy *wraps* (takes its own reference on) the original interface and hands back a proxy that
++/// the caller now owns — i.e. on success `*baseInterface` is a new owned reference (the proxy),
++/// and the proxy internally holds the reference that keeps the original base interface alive. The
++/// caller's responsibility is to `Release` exactly what it now holds: the proxy. It must NOT also
++/// release the original base pointer it passed in (SL took over that slot).
++///
++/// windows-rs COM interfaces are `#[repr(transparent)]` over a `NonNull<c_void>` (the raw COM
++/// pointer). `I::as_raw()` returns that pointer **without** transferring ownership (no AddRef).
++/// So the correct sequence to avoid a double-Release *and* a leak is:
++///
++/// 1. `let mut raw = iface.as_raw();` — copy the raw pointer; `iface` still owns the original ref.
++/// 2. Call `slUpgradeInterface(&mut raw)`. On `eOk`, `raw` now points at the proxy (a new owned
++///    ref). The original `iface` slot is logically consumed by SL (it adopted the original ref's
++///    slot and holds its own internal ref on the base object).
++/// 3. Overwrite `iface`'s pointer in place with `raw`. Because `as_raw()` did **not** AddRef, the
++///    single ref `iface` was tracking is exactly the one SL has taken responsibility for; we must
++///    therefore prevent `iface`'s `Drop` from releasing the *original* base pointer (which SL now
++///    owns) — overwriting the transparent pointer in place does exactly that: the old pointer is
++///    discarded without a Release, and `iface` now owns the proxy ref, whose `Drop` will Release
++///    the proxy. Net refcount delta is zero and there is exactly one owner of each object.
++///
++/// This matches SL's own samples, which call `slUpgradeInterface(&device)` on the bare COM pointer
++/// and continue to use that same pointer (now a proxy) as the single owned handle.
++///
++/// # Safety
++///
++/// `iface` must be a live, exclusively-borrowed windows-rs COM interface (so overwriting its
++/// pointer in place is sound). Must be called on the thread that created the interface and before
++/// the interface is otherwise used, per the SL "IMMEDIATELY after creation" requirement.
++pub(super) unsafe fn streamline_upgrade<I: Interface>(iface: &mut I) {
++    let upgrade = match unsafe { resolve_upgrade_interface() } {
++        Some(f) => f,
++        None => return, // interposer not loaded -> stock wgpu, do nothing
++    };
++
++    // (1) Copy the raw COM pointer. `as_raw()` does NOT AddRef, so `iface` still tracks the one
++    //     reference it was created with.
++    let original = iface.as_raw();
++    if original.is_null() {
++        return;
++    }
++    let mut raw: *mut c_void = original;
++
++    // (2) Ask SL to replace the pointer in place.
++    let result = unsafe { upgrade(&mut raw) };
++    if result != SL_RESULT_OK {
++        log::warn!(
++            "streamline: slUpgradeInterface failed (sl::Result={result}); using the un-upgraded \
++             DXGI factory. DLSS Frame Generation will not attach to wgpu's swapchain."
++        );
++        return;
++    }
++
++    if raw.is_null() {
++        log::warn!(
++            "streamline: slUpgradeInterface returned eOk but a null proxy; leaving the factory \
++             un-upgraded"
++        );
++        return;
++    }
++
++    if raw == original {
++        // SL decided no proxy was needed (e.g. already a proxy). Nothing changed; nothing to do.
++        log::info!("streamline: slUpgradeInterface left the DXGI factory unchanged (already a proxy?)");
++        return;
++    }
++
++    // (3) Install the proxy pointer in place. windows-rs interfaces are #[repr(transparent)] over
++    //     the raw `*mut c_void`, so this overwrites the owned pointer WITHOUT a Release of the
++    //     original (which SL has adopted) and WITHOUT an extra AddRef of the proxy (which SL
++    //     already handed us as an owned ref). See the doc comment above for the refcount argument.
++    // SAFETY: `I` is repr(transparent) over a single non-null `*mut c_void`; `raw` is a valid,
++    // owned proxy ref of the same COM type returned by SL.
++    unsafe {
++        let slot: *mut *mut c_void = core::ptr::from_mut(iface).cast();
++        *slot = raw;
++    }
++
++    log::info!(
++        "streamline: upgraded a wgpu DXGI factory to a Streamline proxy via slUpgradeInterface; \
++         swapchains it creates (and their Present) will be SL proxies"
++    );
++}
++
++/// Upgrade the wgpu DX12 [`DxgiFactory`] in place to a Streamline proxy, if the SL interposer is
++/// loaded. No-op otherwise.
++///
++/// This is the primary Streamline interception mechanism: upgrading the factory makes every
++/// swapchain it subsequently creates (via `CreateSwapChainForHwnd` in [`super::Surface::configure`])
++/// an SL proxy, so the proxied `Present` runs DLSS Frame Generation. The `Instance` stores this
++/// factory and clones it (COM AddRef on the same proxy object) into every `Surface`, so all
++/// surfaces inherit the proxy.
++///
++/// Called once, immediately after the factory is created in `Instance::init`, per SL's requirement
++/// that `slUpgradeInterface` be called "IMMEDIATELY after base interface is created".
++///
++/// # Safety
++///
++/// Must be called immediately after `factory` is created, before it is used or cloned.
++pub(super) unsafe fn upgrade_factory(factory: &mut DxgiFactory) {
++    // Dispatch over the concrete windows-rs interface variant. Each variant is a distinct COM type
++    // (`IDXGIFactory4/5/6`), so we upgrade whichever one is actually stored. SL proxies the
++    // underlying DXGI factory object regardless of which `IDXGIFactoryN` view we hand it.
++    match factory {
++        DxgiFactory::Factory4(f) => unsafe { streamline_upgrade(f) },
++        DxgiFactory::Factory5(f) => unsafe { streamline_upgrade(f) },
++        DxgiFactory::Factory6(f) => unsafe { streamline_upgrade(f) },
++    }
++}
