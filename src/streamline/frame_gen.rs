@@ -183,7 +183,7 @@ pub struct FrameGenerationOptions {
     /// [`super::tagging::FgUi`] is still *supported* (the tag is accepted) but recomposition is off.
     pub enable_ui_recomposition: bool,
     /// DXGI numeric format of the UI buffer, used only when [`Self::enable_ui_recomposition`] is
-    /// `true`. Set it via [`Self::with_ui_format`]; if `None`, SL infers it (0).
+    /// `true`. Set it via [`Self::with_ui_recomposition`]; if `None`, SL infers it (0).
     pub ui_format: Option<u32>,
 }
 

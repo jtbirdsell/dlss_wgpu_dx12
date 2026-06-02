@@ -9,6 +9,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Cheap, platform-agnostic policy gates. These never compile the crate (the Windows-only
+  # `compile_error!` and `build.rs`/bindgen are not invoked by `fmt`/`metadata`), so they run on a
+  # fast Linux runner and fail in seconds rather than after the heavy Windows build.
+  lint:
+    name: fmt / supply-chain (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # `cargo fmt --check` only parses; no DLSS SDK / libclang / build needed.
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      # cargo-deny enforces the supply-chain policy in deny.toml: the RUSTSEC advisory scan, the
+      # license allowlist, and — load-bearing for this crate — the [sources] allowlist that pins the
+      # only permitted git source to the jtbirdsell/wgpu fork. It resolves the graph via
+      # `cargo metadata` (which fetches the git dep) but never builds it.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check
+
   windows:
     name: check / clippy / build (windows)
     # Target the VS2026-based image directly to avoid the in-progress 2025 -> 2025-vs2026 redirect.
@@ -87,6 +118,24 @@ jobs:
           cargo check
           cargo check --no-default-features
           cargo check --features debug_overlay
+
+      # Doc-warning gate: this crate is doc-heavy and `#![deny(missing_docs)]`, so a broken
+      # intra-doc link or a missing doc would otherwise ship silently. `RUSTDOCFLAGS=-D warnings`
+      # turns any rustdoc warning into a failure. Run across the feature sets because the set of
+      # in-scope items (and therefore which links resolve) changes with `ray-reconstruction` /
+      # `frame-generation`. `--no-deps` documents only this crate (dependency docs are irrelevant
+      # to our link/doc warnings and add minutes). This must run on Windows: rustdoc still compiles
+      # the crate, so it needs the same DLSS_SDK (bindgen headers) + LIBCLANG_PATH as the build.
+      - name: cargo doc (-D warnings, feature sets)
+        shell: pwsh
+        env:
+          DLSS_SDK: ${{ runner.temp }}\dlss_sdk
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --no-deps
+          cargo doc --no-deps --features ray-reconstruction
+          cargo doc --no-deps --features frame-generation
 
       # Run the headless unit tests. The mock-based Frame-Generation tests never load the interposer,
       # create a wgpu device, or touch a GPU, so they run on a GPU-less CI runner — they need only the

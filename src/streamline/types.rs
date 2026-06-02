@@ -97,7 +97,7 @@ pub enum StreamlineError {
         result: SlResult,
     },
 
-    /// A [`super::frame_gen::FrameGenerationContext`] was already created from this [`Streamline`]
+    /// A [`crate::FrameGenerationContext`] was already created from this [`crate::Streamline`]
     /// handle (it yields exactly one context). The original handle is left intact and reusable.
     #[error("a FrameGenerationContext was already created from this Streamline handle")]
     ContextAlreadyCreated,

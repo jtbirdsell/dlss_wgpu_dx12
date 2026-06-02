@@ -46,17 +46,16 @@ pub const DEFAULT_DXC_PATH: &str = "dxcompiler.dll";
 /// Builds a [`wgpu::InstanceDescriptor`] that targets the **DX12** backend using the dynamically
 /// loaded **DXC** shader compiler (`dxcompiler.dll` on the default DLL search path).
 ///
-/// This is a convenience for host applications that author Shader Model 6+ HLSL; see the
-/// [module documentation](self) for why DLSS itself never needs this. Pass the returned descriptor
-/// to [`wgpu::Instance::new`].
+/// This is a convenience for host applications that author Shader Model 6+ HLSL (DLSS itself never
+/// needs DXC). Pass the returned descriptor to [`wgpu::Instance::new`].
 ///
 /// The descriptor restricts backends to [`Backends::DX12`] (this crate is DX12-only) and leaves all
 /// other instance options at their `wgpu` defaults (instance flags, memory budget thresholds, no
 /// display handle). If you need to customize those, build on top of
 /// [`dxc_instance_descriptor_at`] or set the fields yourself.
 ///
-/// Requires `dxcompiler.dll` to be shippable next to your executable — see the
-/// [module documentation](self) for the list of DLLs.
+/// Requires `dxcompiler.dll` to be shippable next to your executable — see the crate README for the
+/// list of DLLs.
 ///
 /// # Example
 ///
