@@ -24,16 +24,15 @@ docs-api-ergonomics 5 · performance-resources 3.
 
 ## Progress
 
-**29 of 39 done.** Completed (with the PR that landed them):
+**31 of 39 done.** Completed (with the PR that landed them):
 
 - **High:** H1 ✅ #9 · H2 ✅ #10
-- **Medium:** M1 ✅ #9 · M2 ✅ #9 · M3 ✅ (resolved by H1 + M5) · M4 ✅ #11 · M5 ✅ #13 · M7 ✅ #14 · M9 ✅ #12 · M11 ✅ #12
-- **Low:** L2 ✅ #9 · L13 ✅ #9 · L1 ✅ #10 · L8 ✅ #10 · L14 ✅ #10 · L20 ✅ #10 · L21 ✅ #10 · L3 ✅ #11 · L4 ✅ #11 · L15 ✅ #15 · L16 ✅ #12 · L17 ✅ #12 · L18 ✅ #11 · L19 ✅ #11 · L23 ✅ #15 · L24 ✅ #15
-- **Medium (cont.):** M10 ✅ #15
+- **Medium:** M1 ✅ #9 · M2 ✅ #9 · M3 ✅ (resolved by H1 + M5) · M4 ✅ #11 · M5 ✅ #13 · M6 ✅ #16 · M7 ✅ #14 · M9 ✅ #12 · M10 ✅ #15 · M11 ✅ #12
+- **Low:** L1 ✅ #10 · L2 ✅ #9 · L3 ✅ #11 · L4 ✅ #11 · L8 ✅ #10 · L11 ✅ #16 · L13 ✅ #9 · L14 ✅ #10 · L15 ✅ #15 · L16 ✅ #12 · L17 ✅ #12 · L18 ✅ #11 · L19 ✅ #11 · L20 ✅ #10 · L21 ✅ #10 · L23 ✅ #15 · L24 ✅ #15
 - **Nit:** N1 ✅ #15 · N2 ✅ #15
 - **Partial:** L22 — `rustfmt.toml` + `cargo fmt --all --check` gate landed in #14 (with M7); `.editorconfig` in #10. Still open: `rust-version` (MSRV) + `rust-toolchain.toml` + an MSRV-pinned CI job.
 
-Remaining work, grouped: policy — M6 (fork SPOF), L9 (docs.rs), L22 MSRV remainder; security depth — M8, L10; tests — L5–L7; performance — L11, L12. (Items below are not individually re-marked; cross-reference this list.)
+Remaining work (8), grouped: policy — L9 (docs.rs), L22 MSRV remainder; security depth — M8, L10; tests — L5–L7; performance — L12. The security-depth (M8, L10) and L12 items touch the validated FFI loader / per-frame hot path, so they warrant closer review or a hardware re-run; L5/L6 are partly hardware-gated. (Items below are not individually re-marked; cross-reference this list.)
 
 ---
 

@@ -122,6 +122,15 @@ impl NgxFeature {
     /// them transitions-first. `barriers` is the wgpu transition list (inputs → shader-readable,
     /// output → UAV); `evaluate` performs the feature-specific `EVALUATE_*_EXT` with the open command
     /// list, the feature handle, and the (locked) NGX parameters.
+    ///
+    /// **Accepted cost (audit L11):** this allocates and submits *two* fresh command encoders per
+    /// evaluate (one for the wgpu transitions, one for the raw NGX list), each pulling a D3D12
+    /// allocator/list from wgpu's per-frame pool. The split is *forced* by wgpu 29 — mixing the
+    /// `transition_resources` (wgpu API) and `as_hal_mut`/raw-list (raw API) on a single encoder
+    /// panics (`command/mod.rs`), and the transitions must land before the evaluate in submit order.
+    /// The overhead is negligible beside the NGX evaluate + `queue.submit` it precedes, so it is left
+    /// as-is; if profiling ever shows it hot, fold the barrier transitions into the caller's scene
+    /// encoder (the eval encoder must stay separate).
     pub(crate) fn evaluate<'a>(
         &self,
         queue: &wgpu::Queue,
