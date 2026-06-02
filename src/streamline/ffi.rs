@@ -446,7 +446,7 @@ mod tests {
     //! environment.
 
     use super::StreamlineError;
-    use super::{interposer_path_from, resolve_existing_interposer};
+    use super::{interposer_path_from, ll, resolve, resolve_existing_interposer};
     use std::ffi::OsString;
 
     #[test]
@@ -479,5 +479,58 @@ mod tests {
             result,
             Err(StreamlineError::InterposerNotFound(_))
         ));
+    }
+
+    // The two tests below exercise the `resolve::<T>` helper directly, with NO signature gate, NO
+    // Streamline SDK, and NO GPU. `resolve` is independent of the Authenticode check
+    // (`verify_interposer_signature` is only called inside `SlApi::load`, never inside `resolve`),
+    // so we drive it against `kernel32.dll` — always mapped into every Win32 process, so the load
+    // cannot fail and needs no NVIDIA signature. This is the low-cost option from the L6 backlog: it
+    // covers the `MissingExport` branch and the success (`transmute_copy`) branch that were
+    // previously reachable only by loading a real signed interposer.
+
+    /// Resolving a symbol guaranteed NOT to exist must map to `MissingExport` carrying the requested
+    /// symbol name (NUL trimmed) — the `lib.get(name).map_err(...)` arm of `resolve`, with no signed
+    /// DLL or GPU.
+    #[test]
+    fn resolve_absent_symbol_maps_to_missing_export() {
+        // SAFETY: `kernel32.dll` is a real, already-mapped system DLL; loading it by bare name is
+        // safe and runs no untrusted entry point.
+        let lib = unsafe { ll::Library::new("kernel32.dll") }
+            .expect("kernel32.dll is always loadable in a Win32 process");
+        // SAFETY: the symbol does not exist, so `resolve` returns `Err` before any transmute; `T` is
+        // a pointer-sized `unsafe extern "C" fn` (Copy), satisfying `resolve`'s contract even on the
+        // (unreached) success path.
+        let result = unsafe {
+            resolve::<unsafe extern "C" fn()>(
+                &lib,
+                b"dlss_wgpu_dx12_definitely_not_a_real_export\0",
+            )
+        };
+        match result {
+            Err(StreamlineError::MissingExport { symbol, .. }) => {
+                assert_eq!(symbol, "dlss_wgpu_dx12_definitely_not_a_real_export");
+            }
+            other => panic!("expected MissingExport, got {other:?}"),
+        }
+    }
+
+    /// Resolving a symbol that DOES exist must succeed and yield a non-null fn-pointer — the
+    /// `Ok(transmute_copy(...))` arm. `GetCurrentProcessId` is a stable kernel32 export; we only
+    /// confirm the resolved pointer is non-null (we never CALL it through the deliberately-wrong
+    /// `fn()` signature, whose real ABI is `extern "system" fn() -> u32`).
+    #[test]
+    fn resolve_present_symbol_yields_non_null_pointer() {
+        // SAFETY: see above — loading kernel32.dll by bare name is safe.
+        let lib = unsafe { ll::Library::new("kernel32.dll") }
+            .expect("kernel32.dll is always loadable in a Win32 process");
+        // SAFETY: `GetCurrentProcessId` is exported by kernel32; `T` is pointer-sized. We do not
+        // invoke the returned pointer, only check that resolution produced a non-null address.
+        let resolved = unsafe { resolve::<unsafe extern "C" fn()>(&lib, b"GetCurrentProcessId\0") };
+        let f = resolved.expect("GetCurrentProcessId is a stable kernel32 export");
+        assert_ne!(
+            f as usize, 0,
+            "resolved a present export to a null fn-pointer"
+        );
     }
 }
