@@ -39,7 +39,7 @@
 use super::types::StreamlineError;
 use std::path::Path;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, HWND};
 use windows::Win32::Security::Cryptography::{
     CERT_CONTEXT, CERT_FIND_SUBJECT_CERT, CERT_INFO, CERT_NAME_SIMPLE_DISPLAY_TYPE,
     CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED, CERT_QUERY_ENCODING_TYPE,
@@ -53,6 +53,9 @@ use windows::Win32::Security::WinTrust::{
     WINTRUST_DATA_REVOCATION_CHECKS, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
     WTD_REVOCATION_CHECK_CHAIN, WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE,
     WTD_STATEACTION_VERIFY, WTD_UI_NONE, WinVerifyTrust,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING,
 };
 use windows::core::PCWSTR;
 
@@ -89,13 +92,70 @@ const ALLOW_UNVERIFIED_SIGNER_ENV: &str = "STREAMLINE_ALLOW_UNVERIFIED_SIGNER";
 /// hard-pins cannot be silently relaxed by also setting the opt-out.
 const REQUIRE_NVIDIA_SIGNER_ENV: &str = "STREAMLINE_REQUIRE_NVIDIA_SIGNER";
 
-/// Verify that `path` is an Authenticode-signed binary whose certificate chain terminates at a
-/// trusted root, and (best-effort) that the signer subject contains "NVIDIA".
+/// An open, share-locked handle to a DLL that passed signature verification. Holding this guard
+/// alive across [`super::ffi`]'s `Library::new` keeps the file open with `FILE_SHARE_READ` ONLY (no
+/// write/delete sharing), so the exact bytes that passed `WinVerifyTrust` are far harder to swap or
+/// delete before/while `LoadLibrary` maps them.
 ///
-/// Returns `Ok(())` only if the trust gate passes. Any untrusted / unsigned / tampered binary, or
-/// a parseable signer subject that is not NVIDIA, yields an `Err` and the caller MUST NOT load the
-/// DLL.
-pub(crate) fn verify_interposer_signature(path: &Path) -> Result<(), StreamlineError> {
+/// This **narrows** — it does NOT absolutely close — the verify->load TOCTOU (audit L10): per current
+/// research ("False File Immutability"), a deny-write share lock is a strong mitigation, not a
+/// guarantee of immutability (writable section mappings, network redirectors, transactional tricks
+/// can still bypass share modes). The handle is intentionally NOT passed to `Library::new` (which
+/// must keep its plain, non-canonical path + default search order so the interposer can find its
+/// sibling plugins); it is purely an independent share-lock, closed on drop.
+#[derive(Debug)]
+pub(crate) struct VerifiedDll {
+    handle: HANDLE,
+}
+
+impl Drop for VerifiedDll {
+    fn drop(&mut self) {
+        // SAFETY: `handle` was returned valid by `CreateFileW` (a `VerifiedDll` is only constructed
+        // on success) and is closed exactly once here. This is the ONLY `Drop` L10/M8 introduce and
+        // it closes the FILE HANDLE — never the leaked interposer `Library` (no `FreeLibrary`).
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Open `path` for read with a deny-write/deny-delete share mode (`FILE_SHARE_READ` only), so that
+/// once verified its bytes are far harder to replace/remove while the handle is held. `LoadLibrary`
+/// opens with read+execute sharing, so it can still map a file we hold this way.
+///
+/// **Share-mode note:** if `Library::new` ever fails with `ERROR_SHARING_VIOLATION` against this
+/// lock on some loader/filesystem, the ONLY sanctioned relaxation is to additionally OR in
+/// `FILE_SHARE_DELETE` (which still blocks the rename-over-write swap) — **never** `FILE_SHARE_WRITE`.
+fn open_locked_for_verify(path: &Path, wide_path: &[u16]) -> Result<HANDLE, StreamlineError> {
+    // SAFETY: `wide_path` is a NUL-terminated UTF-16 path. We request GENERIC_READ with
+    // FILE_SHARE_READ only, OPEN_EXISTING (never create), no security attrs, no template. CreateFileW
+    // maps an invalid handle to `Err`, so a returned `Ok` is a live handle owned by us (closed via
+    // the `VerifiedDll` guard, or here on the error path).
+    unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            GENERIC_READ.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .map_err(|e| {
+        StreamlineError::SignatureVerificationFailed(format!(
+            "could not open '{}' for verification with a deny-write share lock: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Shared verification core: open `path` with a deny-write share lock, then run BOTH gates
+/// (trusted-chain trust + fail-closed NVIDIA signer pin) against that exact handle, returning the
+/// still-open guard on success. A caller about to `LoadLibrary` the file holds the guard across the
+/// load (see [`verify_interposer_signature`]); a caller that only needs a yes/no answer drops it
+/// immediately (see [`verify_signed_dll`]). On any gate failure the guard drops and closes the handle.
+fn verify_dll_locked(path: &Path) -> Result<VerifiedDll, StreamlineError> {
     // Encode the path as a NUL-terminated UTF-16 string for the Win32 wide APIs.
     let wide_path: Vec<u16> = path
         .as_os_str()
@@ -103,9 +163,30 @@ pub(crate) fn verify_interposer_signature(path: &Path) -> Result<(), StreamlineE
         .chain(std::iter::once(0))
         .collect();
 
-    verify_trust(path, &wide_path)?;
+    let guard = VerifiedDll {
+        handle: open_locked_for_verify(path, &wide_path)?,
+    };
+    verify_trust(path, &wide_path, guard.handle)?;
     verify_signer_is_nvidia(path, &wide_path)?;
-    Ok(())
+    Ok(guard)
+}
+
+/// Verify the interposer (trusted chain + fail-closed NVIDIA signer pin) and RETURN an open,
+/// share-locked handle guard. The caller MUST hold the returned [`VerifiedDll`] across
+/// `Library::new` so the verified bytes are far harder to swap between verify and load (narrows the
+/// verify->load TOCTOU; see [`VerifiedDll`]). Any untrusted / unsigned / tampered binary, or a signer
+/// that cannot be confirmed NVIDIA, yields an `Err` and the caller MUST NOT load the DLL.
+pub(crate) fn verify_interposer_signature(path: &Path) -> Result<VerifiedDll, StreamlineError> {
+    verify_dll_locked(path)
+}
+
+/// Verify a sibling SL plugin DLL that the interposer pulls in via the default search order (the M8
+/// pre-load pass in [`super::ffi`]). Same trusted-chain + NVIDIA-pin gate as the interposer; returns
+/// `Ok(())` because we do not map these ourselves (the share-locked handle is released immediately —
+/// there is nothing of ours to pin them against here). A present-but-unverifiable sibling is a hard
+/// `Err`.
+pub(crate) fn verify_signed_dll(path: &Path) -> Result<(), StreamlineError> {
+    verify_dll_locked(path).map(drop)
 }
 
 // `OsStr::encode_wide` lives in the Windows-only extension trait.
@@ -119,9 +200,9 @@ use std::os::windows::ffi::OsStrExt;
 /// — e.g. an air-gapped or offline host — we retry **once** with revocation disabled and emit a loud
 /// `REVOCATION-CHECK-SKIPPED` warning for SIEM. Any other failure (untrusted root, no signature,
 /// tampered, or an *actually revoked* certificate) stays a hard `Err`.
-fn verify_trust(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
+fn verify_trust(path: &Path, wide_path: &[u16], handle: HANDLE) -> Result<(), StreamlineError> {
     // Attempt 1: full-chain revocation checking.
-    match verify_trust_once(wide_path, WTD_REVOKE_WHOLECHAIN, true) {
+    match verify_trust_once(wide_path, handle, WTD_REVOKE_WHOLECHAIN, true) {
         WIN_VERIFY_TRUST_S_OK => {
             log::debug!(
                 "WinVerifyTrust: '{}' is Authenticode-signed, chains to a trusted root, and passed \
@@ -141,7 +222,7 @@ fn verify_trust(path: &Path, wide_path: &[u16]) -> Result<(), StreamlineError> {
                  revocation lists is skipped.",
                 path.display()
             );
-            match verify_trust_once(wide_path, WTD_REVOKE_NONE, false) {
+            match verify_trust_once(wide_path, handle, WTD_REVOKE_NONE, false) {
                 WIN_VERIFY_TRUST_S_OK => {
                     log::warn!(
                         "REVOCATION-CHECK-SKIPPED: '{}' passed WinVerifyTrust with revocation \
@@ -178,14 +259,21 @@ fn is_revocation_offline(status: i32) -> bool {
 /// chain revocation logic.
 fn verify_trust_once(
     wide_path: &[u16],
+    handle: HANDLE,
     revocation_checks: WINTRUST_DATA_REVOCATION_CHECKS,
     check_chain: bool,
 ) -> i32 {
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
 
+    // L10: also hand WinVerifyTrust the already-open, share-locked `hFile` (deny write/delete) so the
+    // verified bytes are far harder to swap before the subsequent `Library::new`. `pcwszFilePath`
+    // stays set too — both are valid together; per Microsoft, `hFile` is an optional optimization and
+    // the path is still used for display/catalog lookup, so the deny-write share LOCK (not the hFile
+    // plumbing) is what does the real hardening. See [`VerifiedDll`].
     let mut file_info = WINTRUST_FILE_INFO {
         cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
         pcwszFilePath: PCWSTR(wide_path.as_ptr()),
+        hFile: handle,
         ..Default::default()
     };
 
@@ -479,7 +567,10 @@ mod tests {
     //! Headless tests for the signature hard-gate. These run real Win32 `WinVerifyTrust` against
     //! files on disk — no GPU and no Streamline SDK required, so they run on a Windows CI runner.
 
-    use super::{StreamlineError, unverified_signer_allowed_from, verify_interposer_signature};
+    use super::{
+        StreamlineError, unverified_signer_allowed_from, verify_interposer_signature,
+        verify_signed_dll,
+    };
     use std::ffi::OsString;
     use std::io::Write;
 
@@ -527,6 +618,27 @@ mod tests {
         assert!(
             matches!(result, Err(StreamlineError::SignatureVerificationFailed(_))),
             "expected SignatureVerificationFailed for an unsigned file, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_signed_dll_rejects_unsigned_file() {
+        // The path-generic helper used for the sibling SL plugins (M8) must hard-gate an unsigned
+        // file exactly like the interposer wrapper — same trust gate, same fail-closed default. This
+        // also gives the new open_locked_for_verify path positive coverage on GPU-less CI: the temp
+        // file exists and is writable, so CreateFileW with FILE_SHARE_READ succeeds, and the trust
+        // gate then rejects the junk bytes.
+        let path = std::env::temp_dir().join("dlss_wgpu_dx12_unsigned_sibling_test.bin");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp test file");
+            f.write_all(b"not a signed PE -- junk bytes for the sibling trust gate test")
+                .expect("write temp test file");
+        }
+        let result = verify_signed_dll(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(result, Err(StreamlineError::SignatureVerificationFailed(_))),
+            "expected SignatureVerificationFailed for an unsigned sibling, got {result:?}"
         );
     }
 

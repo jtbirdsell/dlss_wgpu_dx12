@@ -14,7 +14,7 @@
 //!   * Failures surface as the typed [`StreamlineError`] rather than `String`.
 
 use super::api::StreamlineApi;
-use super::security::verify_interposer_signature;
+use super::security::{verify_interposer_signature, verify_signed_dll};
 use super::types::*;
 use core::ffi::c_void;
 use libloading::os::windows as ll;
@@ -24,6 +24,67 @@ use std::sync::OnceLock;
 
 /// Environment variable that points at the Streamline SDK root.
 const STREAMLINE_SDK_ENV: &str = "STREAMLINE_SDK";
+
+/// The sibling SL plugin DLLs the interposer pulls in (via the DEFAULT search order) once it is
+/// active. We Authenticode + NVIDIA-pin each present one BEFORE `slInit` (M8), because
+/// `verify_interposer_signature` covers only the interposer — an attacker who drops a malicious
+/// sibling where the loader resolves it would otherwise get code execution despite a pristine
+/// interposer. All are genuinely NVIDIA-signed, so the happy path still loads. Verified only if
+/// PRESENT: `sl.common.dll` is effectively mandatory, but the DLSS-G-only plugins and the NGX runtime
+/// may be absent in a non-FG staging, so a missing sibling is skipped, not failed.
+const SIBLING_SL_PLUGINS: &[&str] = &[
+    "sl.common.dll",
+    "sl.dlss_g.dll",
+    "sl.reflex.dll",
+    "sl.pcl.dll",
+    "nvngx_dlssg.dll",
+];
+
+/// Authenticode + NVIDIA-pin every known sibling SL plugin (see [`SIBLING_SL_PLUGINS`]) that is
+/// present, BEFORE the interposer is loaded, reusing the interposer's trust gate via
+/// [`verify_signed_dll`]. This does NOT change the DLL search order (a constrained search or a
+/// `\\?\` path makes `slInit` fail with `eErrorNoPlugins`); it is a pre-load verification pass only.
+///
+/// **Which directories (M8 — corrected):** the Windows default search order resolves the siblings
+/// from the **executable's directory FIRST**, and the validated deployment stages the SL plugins
+/// *beside the exe* (see `docs/SETUP.md`); the interposer's own `$STREAMLINE_SDK/bin/x64` dir is an
+/// alternate staging. So we verify the present siblings in BOTH the exe directory (where the loaded
+/// copies live) and `interposer_dir`, de-duplicated.
+///
+/// **Residual surface (NOT closed):** because the search order is (correctly) preserved, this covers
+/// only a KNOWN, ENUMERATED set in those two dirs — it cannot cover an attacker-renamed/unknown DLL
+/// the default search might still resolve, nor the `dxgi.dll`/`d3d12.dll` loader-shims staged beside
+/// the exe (those are the interposer itself, renamed). Those dirs MUST therefore be on ACL-restricted
+/// storage writable only by an administrator.
+fn verify_sibling_plugins(interposer_dir: &std::path::Path) -> Result<(), StreamlineError> {
+    // Build the de-duplicated directory set: the exe dir (searched first / validated staging) then
+    // the interposer's own dir. A failure to locate the exe dir is non-fatal (we still cover the
+    // interposer dir); the residual-surface doc above already requires ACL-restricted storage.
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    // Combinator (not an `if let ... && ...` let-chain) so this stays on the crate's 1.87 MSRV —
+    // let-chains only stabilized in Rust 1.88.
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+    {
+        dirs.push(exe_dir);
+    }
+    if !dirs.iter().any(|d| d == interposer_dir) {
+        dirs.push(interposer_dir.to_path_buf());
+    }
+
+    for dir in &dirs {
+        for name in SIBLING_SL_PLUGINS {
+            let plugin = dir.join(name);
+            if !plugin.exists() {
+                continue;
+            }
+            verify_signed_dll(&plugin)?;
+            log::info!("verified sibling SL plugin signature: {}", plugin.display());
+        }
+    }
+    Ok(())
+}
 
 /// Build the absolute path to the interposer (`<sdk>/bin/x64/sl.interposer.dll`) from an explicit
 /// SDK root, or [`StreamlineError::SdkPathNotSet`] if `sdk` is `None`.
@@ -176,11 +237,21 @@ impl SlApi {
     ///
     /// The interposer is found via `$STREAMLINE_SDK/bin/x64/sl.interposer.dll`; its Authenticode
     /// signature is verified (trusted chain + NVIDIA signer pin, see [`super::security`]) before the
-    /// DLL is loaded. It is then loaded with the **default** Windows search order: NVIDIA's
-    /// interposer locates its sibling plugins (`sl.common`, `sl.dlss_g`, ...) relative to the loading
-    /// context, and constraining the search (e.g. `LOAD_LIBRARY_SEARCH_*`) or passing a verbatim
-    /// `\\?\` path makes `slInit` fail with `eErrorNoPlugins`, so we deliberately keep the plain
-    /// load that the hardware-validated path uses. Feature functions are left `None` until
+    /// DLL is loaded. We ALSO verify, with the identical gate, every known sibling SL plugin present
+    /// in the directories the loader will resolve them from — the **executable's directory** (the
+    /// default search order's first hit, and where the validated deployment stages them) and the
+    /// interposer's own dir — because the interposer pulls those in via the default search order and
+    /// they would otherwise be unverified (see [`verify_sibling_plugins`]). The interposer is then
+    /// loaded with the **default** Windows search order: constraining the search (e.g.
+    /// `LOAD_LIBRARY_SEARCH_*`) or passing a verbatim `\\?\` path makes `slInit` fail with
+    /// `eErrorNoPlugins`, so we deliberately keep the plain load the hardware-validated path uses.
+    ///
+    /// SECURITY POSTURE (not a closed surface): because the default search order is preserved, this
+    /// verifies only a KNOWN, ENUMERATED set of siblings. It does NOT cover an attacker-renamed or
+    /// otherwise-unknown DLL the search might still resolve, nor the `dxgi.dll`/`d3d12.dll`
+    /// loader-shims beside the exe (those are the interposer itself, renamed). The
+    /// `$STREAMLINE_SDK/bin/x64` directory and the exe directory MUST therefore be on ACL-restricted
+    /// storage writable only by an administrator. Feature functions are left `None` until
     /// [`SlApi::resolve_feature_functions`] runs (after `slSetD3DDevice`).
     ///
     /// # Safety
@@ -194,7 +265,23 @@ impl SlApi {
         // Hard gate: refuse to load an interposer that is not a trusted, NVIDIA-signed binary. We
         // verify and load the SAME `path` value (no canonicalization: a `\\?\` verbatim path breaks
         // the interposer's relative plugin discovery -> slInit eErrorNoPlugins).
-        verify_interposer_signature(&path)?;
+        //
+        // L10: the returned guard holds an open handle to the interposer file with FILE_SHARE_READ
+        // ONLY (no write/delete sharing). We keep it alive across `Library::new` below so the exact
+        // bytes that just passed WinVerifyTrust are far harder to swap before LoadLibrary maps them
+        // (NARROWS — does not absolutely close — the verify->load TOCTOU). Dropped after the image is
+        // resident + symbols resolved.
+        let _verified = verify_interposer_signature(&path)?;
+
+        // M8: the interposer pulls in its sibling SL plugins via the default search order, NONE of
+        // which `verify_interposer_signature` covers. Authenticode + NVIDIA-pin each present sibling
+        // (in the exe dir — searched first — and the interposer dir) BEFORE we map the interposer, so
+        // a malicious sibling cannot ride in. We do NOT alter the search order (that breaks slInit);
+        // this is a pre-load verification pass only and cannot cover an unknown/renamed DLL — the
+        // staging dirs must additionally be ACL-restricted (see `verify_sibling_plugins`).
+        if let Some(plugin_dir) = path.parent() {
+            verify_sibling_plugins(plugin_dir)?;
+        }
         log::info!("loading verified sl.interposer.dll from {}", path.display());
 
         // SAFETY: `path` was just signature-verified and confirmed to exist. Loading a DLL runs its
@@ -232,6 +319,12 @@ impl SlApi {
         // mapped for the process lifetime. The OS reclaims it at exit. `slShutdown` (called on
         // teardown) does the real cleanup. See the `SlApi` doc comment.
         core::mem::forget(lib);
+
+        // The interposer image is now resident (mapped by Library::new); the share-locked handle has
+        // served its purpose of keeping the verified bytes immutable across verify+load, so release
+        // it. Dropping HERE (not earlier) is what kept the window narrow. `VerifiedDll::Drop` closes
+        // the FILE HANDLE only — never the leaked `Library` (no FreeLibrary; constraint preserved).
+        drop(_verified);
 
         Ok(Self {
             sl_init,
