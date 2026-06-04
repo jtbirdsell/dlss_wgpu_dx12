@@ -932,7 +932,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "naga"
 version = "29.0.3"
-source = "git+https://github.com/jtbirdsell/wgpu?rev=d81d7552cf201d47359e993fbebc9c088142bc38#d81d7552cf201d47359e993fbebc9c088142bc38"
+source = "git+https://github.com/jtbirdsell/wgpu?rev=933587187b48314553915aa75abddf54987895b0#933587187b48314553915aa75abddf54987895b0"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -2159,7 +2159,7 @@ dependencies = [
 [[package]]
 name = "wgpu"
 version = "29.0.3"
-source = "git+https://github.com/jtbirdsell/wgpu?rev=d81d7552cf201d47359e993fbebc9c088142bc38#d81d7552cf201d47359e993fbebc9c088142bc38"
+source = "git+https://github.com/jtbirdsell/wgpu?rev=933587187b48314553915aa75abddf54987895b0#933587187b48314553915aa75abddf54987895b0"
 dependencies = [
  "arrayvec",
  "bitflags 2.11.1",
@@ -2182,7 +2182,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "29.0.3"
-source = "git+https://github.com/jtbirdsell/wgpu?rev=d81d7552cf201d47359e993fbebc9c088142bc38#d81d7552cf201d47359e993fbebc9c088142bc38"
+source = "git+https://github.com/jtbirdsell/wgpu?rev=933587187b48314553915aa75abddf54987895b0#933587187b48314553915aa75abddf54987895b0"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -2212,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-windows-linux-android"
 version = "29.0.3"
-source = "git+https://github.com/jtbirdsell/wgpu?rev=d81d7552cf201d47359e993fbebc9c088142bc38#d81d7552cf201d47359e993fbebc9c088142bc38"
+source = "git+https://github.com/jtbirdsell/wgpu?rev=933587187b48314553915aa75abddf54987895b0#933587187b48314553915aa75abddf54987895b0"
 dependencies = [
  "wgpu-hal",
 ]
@@ -2220,7 +2220,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "29.0.3"
-source = "git+https://github.com/jtbirdsell/wgpu?rev=d81d7552cf201d47359e993fbebc9c088142bc38#d81d7552cf201d47359e993fbebc9c088142bc38"
+source = "git+https://github.com/jtbirdsell/wgpu?rev=933587187b48314553915aa75abddf54987895b0#933587187b48314553915aa75abddf54987895b0"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -2252,7 +2252,7 @@ dependencies = [
 [[package]]
 name = "wgpu-naga-bridge"
 version = "29.0.3"
-source = "git+https://github.com/jtbirdsell/wgpu?rev=d81d7552cf201d47359e993fbebc9c088142bc38#d81d7552cf201d47359e993fbebc9c088142bc38"
+source = "git+https://github.com/jtbirdsell/wgpu?rev=933587187b48314553915aa75abddf54987895b0#933587187b48314553915aa75abddf54987895b0"
 dependencies = [
  "naga",
  "wgpu-types",
@@ -2261,7 +2261,7 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "29.0.3"
-source = "git+https://github.com/jtbirdsell/wgpu?rev=d81d7552cf201d47359e993fbebc9c088142bc38#d81d7552cf201d47359e993fbebc9c088142bc38"
+source = "git+https://github.com/jtbirdsell/wgpu?rev=933587187b48314553915aa75abddf54987895b0#933587187b48314553915aa75abddf54987895b0"
 dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
