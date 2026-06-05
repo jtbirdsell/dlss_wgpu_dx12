@@ -65,10 +65,13 @@ regenerate from a clean checkout:
 
 ```sh
 git clone --depth 1 --branch v29.0.3 https://github.com/gfx-rs/wgpu.git ../wgpu
-git -C ../wgpu apply patches/wgpu-29.0.3-dx12-raw-command-list.patch          # verify it still applies
-git -C ../wgpu diff -- wgpu-hal/src/dx12/mod.rs > patches/wgpu-29.0.3-dx12-raw-command-list.patch
+# Run these from the dlss_wgpu_dx12 repo root; `git -C ../wgpu apply` resolves the patch path
+# relative to ../wgpu, so reference it via ../dlss_wgpu_dx12/ (not a bare patches/).
+git -C ../wgpu apply ../dlss_wgpu_dx12/patches/wgpu-29.0.3-dx12-raw-command-list.patch   # verify it still applies
+git -C ../wgpu diff -- wgpu-hal/src/dx12/mod.rs > ../dlss_wgpu_dx12/patches/wgpu-29.0.3-dx12-raw-command-list.patch
 ```
 
 Patch 2 spans four files (`wgpu-hal/Cargo.toml`, `wgpu-hal/src/dx12/{instance.rs,mod.rs}`, and the
 new `wgpu-hal/src/dx12/streamline.rs`); regenerate it from the two fork commits with
-`git -C ../wgpu diff 549f758..d81d755 > patches/wgpu-29.0.3-dx12-streamline-factory-upgrade.patch`.
+`git -C ../wgpu diff 549f758..d81d755 > ../dlss_wgpu_dx12/patches/wgpu-29.0.3-dx12-streamline-factory-upgrade.patch`
+(again from the repo root).
