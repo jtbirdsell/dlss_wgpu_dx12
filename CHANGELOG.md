@@ -6,10 +6,14 @@ All notable changes to `dlss_wgpu_dx12` are documented here. The format is based
 
 ## [Unreleased]
 
-These changes landed after the `0.1.0` tag, driven by a multi-agent codebase audit
-([`docs/BACKLOG.md`](docs/BACKLOG.md), all 39 items merged across PRs #9–#22). The crate is not yet
-published to crates.io (`publish = false` — a git `wgpu` dependency precludes it), so this is not a
-release.
+## [0.2.0] - 2026-06-04
+
+The first release shaped by the multi-agent codebase audit ([`docs/BACKLOG.md`](docs/BACKLOG.md),
+all 39 items merged across PRs #9–#23). Distributed as a **git tag / GitHub release** only — the
+crate is not yet on crates.io (`publish = false`, because it depends on a patched `wgpu` pinned by
+git revision; see the fork note under [0.1.0] below). Per SemVer 0.x this minor bump may include
+breaking changes, and the experimental `frame-generation` feature is **not** covered by
+API-stability expectations.
 
 ### Changed
 - `DlssContext::render_resolution()` now returns the **optimal** render resolution (the
