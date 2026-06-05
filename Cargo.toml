@@ -1,6 +1,6 @@
 [package]
 name = "dlss_wgpu_dx12"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # Minimum supported Rust version. Verified by building the full locked graph on 1.87.0 (1.85/1.86
 # fail: wgpu-types 29.0.3 requires rustc 1.87). Enforced by the `msrv` CI job. Bump deliberately when
