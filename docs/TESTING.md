@@ -11,7 +11,7 @@ Streamline (Frame Generation). Different parts are validated at different levels
 2. **Headless mock + loader/signature** — run in CI, no GPU. The Frame-Generation call-order state
    machine driven against a recording mock, plus the interposer loader-path and Authenticode
    signature **error** paths (`WinVerifyTrust` against crafted inputs). See
-   `src/streamline/frame_gen.rs`, `ffi.rs`, `security.rs` test modules.
+   the `src/streamline/{frame_gen,ffi,security}.rs` test modules.
 3. **Real NGX evaluate** — `#[ignore]`d hardware tests (`tests/headless.rs`) that run an actual NGX
    evaluate end to end and **assert on the output**. Not run in CI (no GPU); run locally / on a GPU
    runner.

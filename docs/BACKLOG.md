@@ -24,16 +24,16 @@ docs-api-ergonomics 5 · performance-resources 3.
 
 ## Progress
 
-**35 of 39 done.** Completed (with the PR that landed them):
+**39 of 39 done — all merged.** Completed (with the PR that landed them):
 
 - **High:** H1 ✅ #9 · H2 ✅ #10
-- **Medium:** M1 ✅ #9 · M2 ✅ #9 · M3 ✅ (resolved by H1 + M5) · M4 ✅ #11 · M5 ✅ #13 · M6 ✅ #16 · M7 ✅ #14 · M9 ✅ #12 · M10 ✅ #15 · M11 ✅ #12
-- **Low:** L1 ✅ #10 · L2 ✅ #9 · L3 ✅ #11 · L4 ✅ #11 · L6 ✅ #18 · L7 ✅ #17 · L8 ✅ #10 · L9 ✅ #17 · L11 ✅ #16 · L13 ✅ #9 · L14 ✅ #10 · L15 ✅ #15 · L16 ✅ #12 · L17 ✅ #12 · L18 ✅ #11 · L19 ✅ #11 · L20 ✅ #10 · L21 ✅ #10 · L22 ✅ #17 · L23 ✅ #15 · L24 ✅ #15
+- **Medium:** M1 ✅ #9 · M2 ✅ #9 · M3 ✅ (resolved by H1 + M5) · M4 ✅ #11 · M5 ✅ #13 · M6 ✅ #16 · M7 ✅ #14 · M8 ✅ #21 · M9 ✅ #12 · M10 ✅ #15 · M11 ✅ #12
+- **Low:** L1 ✅ #10 · L2 ✅ #9 · L3 ✅ #11 · L4 ✅ #11 · L5 ✅ #20 · L6 ✅ #18 · L7 ✅ #17 · L8 ✅ #10 · L9 ✅ #17 · L10 ✅ #21 · L11 ✅ #16 · L12 ✅ #19 · L13 ✅ #9 · L14 ✅ #10 · L15 ✅ #15 · L16 ✅ #12 · L17 ✅ #12 · L18 ✅ #11 · L19 ✅ #11 · L20 ✅ #10 · L21 ✅ #10 · L22 ✅ #17 · L23 ✅ #15 · L24 ✅ #15
 - **Nit:** N1 ✅ #15 · N2 ✅ #15
 
 Notes: **L9** is resolved by *documenting* that docs.rs is intentionally unsupported (NGX bindings derive from non-redistributable NVIDIA headers absent on docs.rs, and a git `wgpu` dep blocks publishing) with local-build instructions — a functional docs.rs build is not achievable, so no scaffolding was added. **L22** MSRV is **1.87** (verified: 1.85/1.86 fail on wgpu-types 29.0.3; a single FG let-chain that would have forced 1.88 was rewritten to a match-guard).
 
-Remaining work (4) — all touch the validated FFI loader / per-frame hot path or need the RTX 4090, so they are being implemented as PRs **held for hardware validation** (not merged): security depth — M8, L10; tests — L5 (headless refactor + unit test merge-ready, but its companion `#[ignore]d` teardown test wants a 4090 run); performance — L12. (L6 turned out fully headless — `resolve` tests against `kernel32.dll`, no GPU/load-path change — so it was merged in #18 rather than held.)
+All 39 items are merged as of `main` (PRs #9–#22, all post-`v0.1.0`). The last four to land touch the validated FFI loader / per-frame hot path or needed an RTX 4090, so they were **held for hardware validation** before merging: performance — L12 (#19); tests — L5 (#20; the `#[ignore]d` teardown test was exercised on a 4090 from the harness); security depth — M8, L10 (#21). (L6 turned out fully headless — `resolve` tests against `kernel32.dll`, no GPU/load-path change — so it merged in #18 without a hold.)
 
 ---
 
